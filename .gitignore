@@ -1,0 +1,58 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+
+# Medical Data (patient images, inference results)
+data/
+
+# AI Model Weights (large binary files)
+AI_Models/**/*.pt
+AI_Models/**/*.pth
+AI_Models/**/*.onnx
+AI_Models/**/*.pkl
+AI_Models/**/checkpoint/
+AI_Models/**/weights/
+
+# Database Dumps (may contain sensitive data)
+db_dump.json
+*.dump
+*.bak
+
+# Test Output Artifacts
+bme_check_result.txt
+test_bme_out.txt
+test_bme_result.json
+test_bme_result.png
+*.test_result.*
+
+# Logs
+*.log
+logs/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code (local settings)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
