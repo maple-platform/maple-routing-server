@@ -1,24 +1,24 @@
-# MARS AI Back-end
+# maple-routing-server
 
-MARS AI 플랫폼의 백엔드 서버입니다.
+maple-platform의 백엔드 서버입니다.
 의료 AI 추론 요청을 받아 컨테이너화된 AI 모델로 라우팅하고, 결과를 저장·반환합니다.
 
 ---
 
 ## 시스템 구성
 
-MARS AI 플랫폼은 세 개의 독립적인 서버로 구성됩니다.
+maple-platform은 세 개의 독립적인 서버로 구성됩니다.
 
 ```
-[Frontend UI]  mars-agent-v2 (React, Port 3000)
+[Frontend UI]  maple-client (React, Port 3000)
       │
       │  HTTP (Agent 직접 접근 불가 — 백엔드 프록시 경유)
       ▼
-[Back-end]     MARS_AI_Back-end (FastAPI, Port 8000)    ◄── 이 저장소
+[Back-end]     maple-routing-server (FastAPI, Port 8000)    ◄── 이 저장소
       │
-      ├── HTTP ──► [AI 모델 컨테이너]  Port 9001~9004
+      ├── HTTP ──► [AI 모델 컨테이너]  maple-model-execution-server (Port 9001~9004)
       │
-      └── SSH터널(localhost:8001) ──► [AI Agent]  MARS_AI_Agent (NHN Cloud B200, Port 8001)
+      └── SSH터널(localhost:8001) ──► [AI Agent]  maple-agent-server (NHN Cloud B200, Port 8001)
                                                   ├── Ollama (Port 11434, gemma4:31b)
                                                   ├── ChromaDB (Port 8002, RAG)
                                                   └── /wiki (LLM Wiki, 지식 누적)
@@ -29,9 +29,10 @@ MARS AI 플랫폼은 세 개의 독립적인 서버로 구성됩니다.
 
 | 서버 | 저장소 | 포트 | 역할 |
 |---|---|---|---|
-| Back-end | `MARS_AI_Back-end` | 8000 | 추론 라우팅, 프로젝트 관리, 결과 저장, 파일 변환 |
-| AI Agent | `MARS_AI_Agent` | NHN Cloud B200:8001 (SSH터널 → localhost:8001) | 모드별 쿼리 라우팅, RAG 임상 해석, 모델 검색, VLM 범용 분석 |
-| Frontend | `mars-agent-v2` | 3000 | 사용자 인터페이스 |
+| Back-end | `maple-routing-server` | 8000 | 추론 라우팅, 프로젝트 관리, 결과 저장, 파일 변환 |
+| AI Agent | `maple-agent-server` | NHN Cloud B200:8001 (SSH터널 → localhost:8001) | 모드별 쿼리 라우팅, RAG 임상 해석, 모델 검색, VLM 범용 분석 |
+| AI 모델 | `maple-model-execution-server` | 9001~9004 | 도메인 특화 AI 모델 실행 |
+| Frontend | `maple-client` | 3000 | 사용자 인터페이스 |
 
 ---
 
@@ -45,9 +46,11 @@ MARS AI 플랫폼은 세 개의 독립적인 서버로 구성됩니다.
 | **데이터베이스** | MongoDB | - | 프로젝트·모델 메타데이터, 결과 이력 저장 |
 | | Motor | 3.7.0 | 비동기 MongoDB 드라이버 |
 | **HTTP 클라이언트** | httpx | 0.27.0 | AI 컨테이너·Agent 비동기 호출 |
-| **파일 처리** | pydicom | - | DICOM → PNG 변환 (범용모드) |
-| | Pillow | - | 이미지 base64 인코딩 |
-| | pandas | - | CSV 파싱 → dict 변환 |
+| **파일 처리** | pydicom | 3.0.1 | DICOM → PNG 변환 (general 모드) |
+| | nibabel | 5.3.2 | NIfTI → PNG 변환 (general 모드) |
+| | Pillow | 10.4.0 | 이미지 base64 인코딩 |
+| | numpy | 2.2.4 | pixel 정규화 |
+| | pandas | 2.3.2 | CSV 파싱 → dict 변환 |
 | **컨테이너** | Docker | - | AI 모델 격리 실행 |
 | | docker-compose | - | 멀티 컨테이너 오케스트레이션 |
 
@@ -85,13 +88,13 @@ AI 컨테이너 추론처럼 I/O 대기가 긴 작업에서도 서버가 블로�
 ## 폴더 구조
 
 ```
-MARS_AI_Back-end/
+maple-routing-server/
 ├── main.py                     # FastAPI 앱 진입점
 ├── dependencies.py             # 의존성 주입 설정
 ├── utils.py                    # 공통 유틸 (MongoDB ObjectId → JSON 변환 등)
 ├── requirements.txt
 ├── Dockerfile                  # 백엔드 컨테이너 이미지
-├── docker-compose.yml          # AI 모델 컨테이너 오케스트레이션
+├── scan_and_register.py        # AI_Models/ 스캔 → MongoDB + ChromaDB 일괄 등록 유틸
 │
 ├── config/
 │   └── database.py             # MongoDB 클라이언트 설정
@@ -110,7 +113,8 @@ MARS_AI_Back-end/
 │   ├── inference_service.py    # 단일 모델 추론 + 컨테이너 호출 + 파일 변환
 │   ├── pipeline_service.py     # 다단계 파이프라인 오케스트레이션
 │   ├── agent_service.py        # AI Agent 연동 (plan / interpret 호출)
-│   └── admin_service.py        # 관리자 CRUD
+│   ├── admin_service.py        # 관리자 CRUD
+│   └── inference_client.py     # AI 컨테이너 HTTP 클라이언트
 │
 ├── repositories/               # 데이터 접근 레이어 (MongoDB)
 │   ├── projects_repository.py  # 진료과/프로젝트/모델 CRUD
@@ -119,19 +123,9 @@ MARS_AI_Back-end/
 ├── models/
 │   └── schemas.py              # Pydantic 요청/응답 스키마
 │
-├── data/                       # Docker 볼륨 마운트 디렉토리
-│   ├── input/                  # 업로드된 의료 영상
-│   └── output/                 # 추론 결과 이미지/텍스트
-│
-└── AI_Models/                  # AI 모델 컨테이너 소스
-    ├── Rheumatology/
-    │   ├── SI Joints Detection/   # Port 9001
-    │   └── BME Classification/    # Port 9002
-    ├── Neurology/
-    │   ├── ParkinsonGait_ML/      # Port 9003
-    │   └── nnUNet_SMWI_Segmentation/  # Port 9004
-    └── AI_center/
-        └── Tumer_segmentation/    # (등록 예정)
+└── data/                       # Docker 볼륨 마운트 디렉토리 (gitignore)
+    ├── input/                  # 업로드된 의료 영상
+    └── output/                 # 추론 결과 이미지/텍스트
 ```
 
 ---
@@ -154,7 +148,7 @@ MARS_AI_Back-end/
 | `GET` | `/health` | 백엔드 서버 상태 확인 |
 
 ```json
-{"status": "ok", "service": "mars-ai-backend"}
+{"status": "ok", "service": "maple-routing-server"}
 ```
 
 ### Inference — 추론 실행
@@ -292,7 +286,7 @@ MARS_AI_Back-end/
 | `inference_script` | File (선택) | 추론 스크립트 업로드 |
 | `requirements_file` | File (선택) | 패키지 목록 파일 업로드 |
 
-모델 등록(`POST /admin/models`) 시 백엔드가 MongoDB 저장과 동시에 Agent의 `POST /agent/models/register`를 호출하여 Wiki 페이지 자동 생성 및 ChromaDB `mars_models` 등록을 수행합니다.
+모델 등록(`POST /admin/models`) 시 백엔드가 MongoDB 저장과 동시에 Agent의 `POST /agent/models/register`를 호출하여 Wiki 페이지 자동 생성 및 ChromaDB `maple_models` 등록을 수행합니다.
 
 모델 삭제(`DELETE /admin/models`) 시에도 Agent의 `DELETE /agent/models/{model_id}`를 호출하여 Wiki 및 ChromaDB에서 동기 삭제합니다.
 
@@ -362,12 +356,12 @@ AI Agent 서버가 관리하며, 백엔드는 직접 접근하지 않고 Agent H
 
 | 컬렉션 | 데이터 | 용도 |
 |---|---|---|
-| `mars_models` | 등록된 AI 모델의 설명·`required_data`·`output_image_role` 벡터 임베딩 | 특화모델모드에서 쿼리에 맞는 모델 탐색 |
+| `maple_models` | 등록된 AI 모델의 설명·`required_data`·`output_image_role` 벡터 임베딩 | 특화모델모드에서 쿼리에 맞는 모델 탐색 |
 | `pubmedqa` / `medmcqa` | 임상 논문·QA 데이터 벡터 임베딩 | 임상지식모드 RAG 검색 |
 | Wiki (`/wiki`) | 누적된 임상 해석 패턴 마크다운 | 임상 해석 품질 개선 |
 
 **모델 등록 시 ChromaDB 동기화:**
-`POST /admin/models` → 백엔드가 MongoDB에 저장 후 Agent의 `POST /agent/models/register` 자동 호출 → ChromaDB `mars_models`에 벡터 등록
+`POST /admin/models` → 백엔드가 MongoDB에 저장 후 Agent의 `POST /agent/models/register` 자동 호출 → ChromaDB `maple_models`에 벡터 등록
 
 **모델 삭제 시 ChromaDB 동기화:**
 `DELETE /admin/models/{model_name}` → 백엔드가 Agent의 `DELETE /agent/models/{model_id}` 자동 호출 → ChromaDB에서 제거
@@ -451,9 +445,9 @@ Agent는 이 role을 기준으로 임상 해석 텍스트에 `[IMG:role]` 토큰
 
 ```bash
 # 1. SSH 터널 연결 (Agent 서버, 별도 터미널)
-ssh -L 8001:localhost:8001 mars-platform -N
-# SSH config (~/.ssh/config) 에 mars-platform 등록 필요:
-#   Host mars-platform
+ssh -L 8001:localhost:8001 maple-platform -N
+# SSH config (~/.ssh/config) 에 maple-platform 등록 필요:
+#   Host maple-platform
 #       HostName 59.150.35.1
 #       Port 34702
 #       User skku_mjch
@@ -461,7 +455,7 @@ ssh -L 8001:localhost:8001 mars-platform -N
 
 # 2. Agent 연결 확인
 curl http://localhost:8001/health
-# {"status":"ok","service":"mars-ai-agent","ollama":"ok","chromadb":"ok"}
+# {"status":"ok","service":"maple-agent-server","ollama":"ok","chromadb":"ok"}
 
 # 3. 의존성 설치
 pip install -r requirements.txt
@@ -504,7 +498,7 @@ docker-compose down
 ```
 1. 클라이언트  →  POST /inference {mode: "prediction", department, project, file}
 2. Back-end    →  POST /agent/plan {mode: "prediction", query, uploaded_types}
-3. AI Agent    →  ChromaDB mars_models 검색 → required_data 매칭 → 실행 계획 반환
+3. AI Agent    →  ChromaDB maple_models 검색 → required_data 매칭 → 실행 계획 반환
 4. Back-end    →  실행 계획의 steps 순서대로:
                     MongoDB에서 docker.service_url 조회
                     파일을 ./data/input/{dept}/{project}/{ts}/ 에 저장
@@ -580,7 +574,7 @@ Step 2  →  BME Classification   →  ROI를 입력으로 받아 GradCAM 반환
 4. meta.json의 docker.service_url 기입
 5. POST /admin/models/{department}/{project} 로 MongoDB 등록
    └── 백엔드가 자동으로 POST /agent/models/register 호출
-       └── AI Agent: Wiki 페이지 생성 + ChromaDB mars_models 등록
+       └── AI Agent: Wiki 페이지 생성 + ChromaDB maple_models 등록
 6. docker-compose up -d --build {서비스명} 으로 컨테이너 실행
 ```
 
@@ -667,14 +661,14 @@ docker inspect {컨테이너명} | grep -A 10 Health
 **`no such service` 오류**
 
 `docker-compose.yml`이 있는 디렉토리에서 실행해야 합니다.
-AI 모델 컨테이너는 `MARS_AI_Back-end/`에 `docker-compose.yml`이 있습니다.
+AI 모델 컨테이너는 `maple-routing-server/`에 `docker-compose.yml`이 있습니다.
 
 ```bash
 # 올바른 경로
-cd MARS_AI_Back-end
+cd maple-routing-server
 docker-compose up -d nnunet-smwi
 
-# ❌ MARS_AI_Agent/ 등 다른 디렉토리에서 실행하면 오류
+# ❌ maple-agent-server/ 등 다른 디렉토리에서 실행하면 오류
 ```
 
 ---
@@ -728,7 +722,7 @@ Agent 서버 최초 실행 시 ChromaDB를 먼저 띄운 후 `ingest_knowledge.p
 chroma run --host 0.0.0.0 --port 8002 --path ./chroma_data
 
 # 사전 지식 ingest (최초 1회)
-cd MARS_AI_Agent
+cd maple-agent-server
 python scripts/ingest_knowledge.py
 ```
 
