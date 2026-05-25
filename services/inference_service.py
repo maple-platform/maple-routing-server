@@ -1,5 +1,7 @@
 import logging
-from typing import List, Dict, Any
+from typing import Dict, Any
+
+from config.settings import MODEL_ROOT as _DEFAULT_MODEL_ROOT
 
 import os, json
 import pandas as pd
@@ -15,7 +17,7 @@ from services.inference_client import (
     InferenceServerTimeout,
 )
 
-logger = logging.getLogger("mars.inference")
+logger = logging.getLogger("maple.inference")
 
 
 class InferenceService:
@@ -52,40 +54,13 @@ class InferenceService:
         img.save(buffered, format="PNG")
         return "data:image/png;base64," + base64.b64encode(buffered.getvalue()).decode()
 
-    def _normalize_image_result(self, result: Any) -> List[np.ndarray]:
-        if isinstance(result, np.ndarray):
-            return [result]
-        if isinstance(result, list):
-            return [img for img in result if isinstance(img, np.ndarray)]
-        if isinstance(result, dict):
-            images = result.get("images")
-            if isinstance(images, np.ndarray):
-                return [images]
-            if isinstance(images, list):
-                return [img for img in images if isinstance(img, np.ndarray)]
-            if isinstance(result.get("image"), np.ndarray):
-                return [result["image"]]
-        return []
-
-    def _save_images_to_dir(self, images: List[np.ndarray], save_output_dir: Path) -> List[str]:
-        saved_files: List[str] = []
-        for idx, img_arr in enumerate(images, start=1):
-            if img_arr is None:
-                continue
-            pil_img = img_arr if isinstance(img_arr, Image.Image) else Image.fromarray(img_arr.astype("uint8"))
-            filename = f"result_{idx}.png"
-            save_path = save_output_dir / filename
-            pil_img.save(save_path)
-            saved_files.append(str(save_path))
-        return saved_files
-
     # ────────────────────────────────────────────────
     # 컨테이너 HTTP 추론
     # ────────────────────────────────────────────────
 
     def _model_path_from_model_info(self, model_info: dict) -> str | None:
         model_path_dict = model_info.get("model_path", {})
-        model_root = os.getenv("MODEL_ROOT")
+        model_root = os.getenv("MODEL_ROOT") or _DEFAULT_MODEL_ROOT
         if model_path_dict and model_root:
             rel_path = list(model_path_dict.values())[0]
             clean = rel_path.replace("\\", "/").lstrip("/")
@@ -123,10 +98,10 @@ class InferenceService:
         # 환경변수 fallback (docker-compose / K8s 모두 동일하게 동작)
         image = docker_info.get("image", "")
         env_map = {
-            "mars/si-joint-detector": "SI_JOINT_URL",
-            "mars/bme-classifier":    "BME_URL",
-            "mars/parkinson-gait":    "PARKINSON_URL",
-            "mars/nnunet-smwi":       "NNUNET_SMWI_URL",
+            "maple/si-joint-detector": "SI_JOINT_URL",
+            "maple/bme-classifier":    "BME_URL",
+            "maple/parkinson-gait":    "PARKINSON_URL",
+            "maple/nnunet-smwi":       "NNUNET_SMWI_URL",
         }
         for key, env_var in env_map.items():
             if image.startswith(key):
@@ -250,7 +225,8 @@ class InferenceService:
 
         params = {
             "container_url": container_url,
-            "container_endpoint": "/run",
+            "container_endpoint": "/run/v2",
+            "model_name": project,
         }
         if model_path:
             params["model_path"] = model_path
@@ -304,13 +280,16 @@ class InferenceService:
             logger.info(f"결과 이미지 {len(saved_files)}장 저장 완료 → {save_output_dir}")
 
             # images 필드: Agent VLM 해석용 (role + data)
-            # - 이미지가 1장: output_image_role 그대로 사용  (예: "bbox_overlay")
-            # - 이미지가 N장: output_image_role_1 ~ output_image_role_N  (예: "seg3d_1", "seg3d_2", ...)
+            # - output_files가 있으면 파일명을 role로 사용 (Agent의 [IMG:filename] 태그와 키 일치)
+            # - 없으면 output_image_role 기반으로 생성
             images_for_agent = []
             multi = len(images_b64_list) > 1
+            output_files = container_result.get("output_files", [])
             for idx, b64 in enumerate(images_b64_list):
                 entry: dict = {"data": f"data:image/png;base64,{b64}"}
-                if output_image_role:
+                if output_files and idx < len(output_files):
+                    entry["role"] = Path(output_files[idx]).name
+                elif output_image_role:
                     entry["role"] = f"{output_image_role}_{idx + 1}" if multi else output_image_role
                 images_for_agent.append(entry)
 

@@ -8,7 +8,6 @@ AI_Models/ 폴더를 스캔하여 meta.json이 있는 모델을 MongoDB + Chroma
 
 import sys
 import io
-import os
 import json
 import asyncio
 import argparse
@@ -19,10 +18,10 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import httpx
 from pymongo import MongoClient
 
-MONGO_URL  = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-AGENT_URL  = os.getenv("AGENT_URL", "http://localhost:8001")
-AI_MODELS  = Path(os.getenv("AI_MODELS_DIR", "../mars-ai-inference/AI_Models"))
-DB_NAME    = "projects_db"
+from config.settings import MONGO_URI, AGENT_URL, AI_MODELS_DIR, DB_NAME
+
+MONGO_URL = MONGO_URI
+AI_MODELS = Path(AI_MODELS_DIR)
 
 
 # ── MongoDB 헬퍼 ─────────────────────────────────────────────────────────────
@@ -56,8 +55,9 @@ def upsert_model_to_mongo(col, department_name, project_name, model_name, model_
     """MongoDB에 모델 upsert. project에 모델 정보를 직접 저장."""
     doc = col.find_one({})
     if not doc:
-        print("  ❌ departments 문서 없음")
-        return False
+        col.insert_one({"departments": []})
+        doc = col.find_one({})
+        print("  + maple_db 초기 문서 생성")
 
     depts = doc.get("departments", [])
 

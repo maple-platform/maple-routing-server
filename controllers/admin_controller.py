@@ -6,8 +6,10 @@ from services.projects_service import ProjectsService
 from dependencies import get_projects_service, get_admin_service
 from models.schemas import DepartmentCreate, DepartmentUpdate, ProjectCreate, ProjectUpdate, ModelCreate, ModelUpdate, ModelDelete
 
-import json
+import logging
 from typing import List
+
+logger = logging.getLogger("maple.admin.controller")
 
 router = APIRouter(tags=["admin"])
 
@@ -126,15 +128,13 @@ async def create_model(
                 else:
                     model_path_dict[key] = value
 
-        parsed_required_data = required_data
-
         result = await service.create_model(
             department_name=department_name,
             project_name=project_name,
             model_name=model_name,
             model_description=model_description,
             model_path_dict=model_path_dict,
-            required_data=parsed_required_data,
+            required_data=required_data,
             task_type=task_type,
             result_type=result_type,
             output_image_role=output_image_role or None,
@@ -145,7 +145,7 @@ async def create_model(
         return result
 
     except Exception as e:
-        print("❌ 모델 생성 중 예외 발생:", e)
+        logger.error(f"모델 생성 중 예외 발생: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
@@ -172,5 +172,5 @@ async def delete_model(model_name: str, model: ModelDelete, service: AdminServic
             raise HTTPException(status_code=404, detail=result["error"])
         return result
     except Exception as e:
-        print(e)
+        logger.error(f"모델 삭제 중 예외 발생: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")

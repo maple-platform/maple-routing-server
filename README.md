@@ -16,7 +16,7 @@ maple-platform은 세 개의 독립적인 서버로 구성됩니다.
       ▼
 [Back-end]     maple-routing-server (FastAPI, Port 8000)    ◄── 이 저장소
       │
-      ├── HTTP ──► [AI 모델 컨테이너]  maple-model-execution-server (Port 9001~9004)
+      ├── HTTP ──► [AI 모델 컨테이너]  maple-model-execution-server (Port 9020~9023)
       │
       └── SSH터널(localhost:8001) ──► [AI Agent]  maple-agent-server (NHN Cloud B200, Port 8001)
                                                   ├── Ollama (Port 11434, gemma4:31b)
@@ -31,7 +31,7 @@ maple-platform은 세 개의 독립적인 서버로 구성됩니다.
 |---|---|---|---|
 | Back-end | `maple-routing-server` | 8000 | 추론 라우팅, 프로젝트 관리, 결과 저장, 파일 변환 |
 | AI Agent | `maple-agent-server` | NHN Cloud B200:8001 (SSH터널 → localhost:8001) | 모드별 쿼리 라우팅, RAG 임상 해석, 모델 검색, VLM 범용 분석 |
-| AI 모델 | `maple-model-execution-server` | 9001~9004 | 도메인 특화 AI 모델 실행 |
+| AI 모델 | `maple-model-execution-server` | 9020~9023 | 도메인 특화 AI 모델 실행 |
 | Frontend | `maple-client` | 3000 | 사용자 인터페이스 |
 
 ---
@@ -91,12 +91,12 @@ AI 컨테이너 추론처럼 I/O 대기가 긴 작업에서도 서버가 블로�
 maple-routing-server/
 ├── main.py                     # FastAPI 앱 진입점
 ├── dependencies.py             # 의존성 주입 설정
-├── utils.py                    # 공통 유틸 (MongoDB ObjectId → JSON 변환 등)
 ├── requirements.txt
 ├── Dockerfile                  # 백엔드 컨테이너 이미지
 ├── scan_and_register.py        # AI_Models/ 스캔 → MongoDB + ChromaDB 일괄 등록 유틸
 │
 ├── config/
+│   ├── settings.py             # 환경변수 상수 정의 (단일 진입점)
 │   └── database.py             # MongoDB 클라이언트 설정
 │
 ├── routes/
@@ -138,8 +138,8 @@ maple-routing-server/
 |---|---|---|
 | `GET` | `/projects/` | 전체 진료과 목록 |
 | `GET` | `/projects/{department}` | 진료과 내 프로젝트 목록 |
-| `GET` | `/projects/{department}/{project_number}` | 프로젝트 내 모델 목록 |
-| `GET` | `/projects/{department}/{project_number}/{model_number}/data` | 모델의 required_data 조회 |
+| `GET` | `/projects/{department}/{project_name}` | 프로젝트 내 모델 목록 |
+| `GET` | `/projects/{department}/{project_name}/{model_number}/data` | 모델의 required_data 조회 |
 
 ### Health — 헬스체크
 
@@ -165,8 +165,8 @@ maple-routing-server/
 
 | 파라미터 | 타입 | 설명 |
 |---|---|---|
-| `department` | string | 진료과명 (e.g. `Rheumatology`). `prediction` 모드 전용 |
-| `project` | string | 프로젝트명 (e.g. `SI Joints Detection`). `prediction` 모드 전용 |
+| `department` | string | 진료과명 (e.g. `Neurology`, `Radiology`). `prediction` 모드 전용 |
+| `project` | string | 프로젝트명 (e.g. `BraTS2020 T1ce UNet3D`, `RSNA Pneumonia YOLO26x`). `prediction` 모드 전용 |
 | `query` | string | 사용자 자연어 요청 |
 | `mode` | string | `auto` \| `clinical` \| `prediction` \| `general` (기본값: `auto`) |
 | `file` | File | DICOM / NIfTI / CSV 파일 (선택) |
@@ -183,22 +183,17 @@ maple-routing-server/
 **Response**
 
 ```json
-// 특화모델모드(prediction) 응답
+// 특화모델모드(prediction) 응답 — BraTS2020 T1ce UNet3D (뇌종양 분할)
 {
   "status": "success",
   "mode": "prediction",
   "result_type": "image",
   "images": ["data:image/png;base64,..."],
-  "predictions": [
-    {"side": "left", "pred": 1, "pred_name": "BME", "prob": 0.87}
-  ],
-  "step_results": [
-    {"step": 1, "model": "SI Joints Detection", "result_type": "image", "predictions": null},
-    {"step": 2, "model": "BME Classification", "result_type": "image", "predictions": [...]}
-  ],
-  "interpretation": "임상 해석 텍스트 (Agent /agent/interpret 반환)\n\n[IMG:bbox_overlay] ...",
+  "predictions": null,
+  "step_results": [],
+  "interpretation": "임상 해석 텍스트 (Agent /agent/interpret 반환)\n\n[IMG:000_sample_t1ce_WT.png] ...",
   "interpretation_images": {
-    "bbox_overlay": "data:image/png;base64,..."
+    "000_sample_t1ce_WT.png": "data:image/png;base64,..."
   }
 }
 ```
@@ -234,10 +229,10 @@ maple-routing-server/
 | `file` | File | 입력 파일 |
 
 ```json
-// steps 예시
+// steps 예시 — 다단계 파이프라인 (현재 등록된 모델은 모두 standalone)
 [
-  {"step": 1, "model": "YOLOv12",   "department": "Rheumatology", "project": "SI Joints Detection"},
-  {"step": 2, "model": "GradCAM++", "department": "Rheumatology", "project": "BME Classification"}
+  {"step": 1, "department": "Neurology", "project": "BraTS2020 T1 UNet3D"},
+  {"step": 2, "department": "Neurology", "project": "BraTS2020 T1ce UNet3D"}
 ]
 ```
 
@@ -311,7 +306,7 @@ maple-routing-server/
 
 ### MongoDB
 
-**DB명:** `projects_db`
+**DB명:** `maple_db`
 
 | 컬렉션 | 설명 |
 |---|---|
@@ -324,18 +319,47 @@ maple-routing-server/
 {
   "departments": [
     {
-      "department_name": "Rheumatology",
+      "department_name": "Neurology",
       "projects": {
         "1": {
-          "project_name": "SI Joints Detection",
-          "model_name": "YOLOv12",
-          "model_path": { "best.pt": "AI_Models/.../checkpoint/best.pt" },
+          "project_name": "BraTS2020 T1ce UNet3D",
+          "model_name": "BraTS2020_T1ce_UNet3D",
+          "model_path": { "best.pt": "AI_Models/Neurology/BraTS2020_T1ce_UNet3D/checkpoint/best.pt" },
+          "required_data": ["nifti"],
+          "task_type": "segmentation",
+          "result_type": "image",
+          "output_image_role": "segmentation_overlay",
+          "docker": {
+            "service_url": "http://localhost:9021"
+          }
+        }
+      }
+    },
+    {
+      "department_name": "Radiology",
+      "projects": {
+        "1": {
+          "project_name": "RSNA Pneumonia YOLO26x",
+          "model_name": "RSNA_Pneumonia_YOLO26x",
+          "model_path": { "best.pt": "AI_Models/Radiology/RSNA_Pneumonia_YOLO26x/checkpoint/best.pt" },
           "required_data": ["dicom"],
           "task_type": "detection",
           "result_type": "image",
           "output_image_role": "bbox_overlay",
           "docker": {
-            "service_url": "http://localhost:9001"
+            "service_url": "http://localhost:9022"
+          }
+        },
+        "2": {
+          "project_name": "ChestXray14 Multilabel Classification",
+          "model_name": "ChestXray14_Multilabel_Classification",
+          "model_path": {},
+          "required_data": ["image"],
+          "task_type": "classification",
+          "result_type": "image",
+          "output_image_role": "gradcam_overlay",
+          "docker": {
+            "service_url": "http://localhost:9021"
           }
         }
       }
@@ -370,32 +394,67 @@ AI Agent 서버가 관리하며, 백엔드는 직접 접근하지 않고 Agent H
 
 ## AI 모델 컨테이너
 
-각 AI 모델은 독립적인 Docker 컨테이너로 실행됩니다. 내부 포트는 `9000`으로 고정이며, 외부 포트만 다릅니다.
+AI 모델은 `maple-model-execution-server`에서 실행 환경별로 묶인 런타임 컨테이너로 관리됩니다.
+내부 포트는 `8000`으로 고정이며, 외부 포트만 다릅니다.
 
-| 컨테이너 | 외부 포트 | 모델 | GPU |
+| 컨테이너 | 외부 포트 | 담당 모델 | GPU |
 |---|---|---|---|
-| `si-joint-detector` | 9001 | YOLOv12 SI Joint Detection | ✅ |
-| `bme-classifier` | 9002 | GradCAM++ BME Classification | ✅ |
-| `parkinson-gait` | 9003 | Parkinson Fall Risk (Gait ML) | - |
-| `nnunet-smwi` | 9004 | nnUNet SMWI Segmentation | ✅ |
+| `maple-runtime-basic` | 9020 | 범용 경량 모델 | ✅ |
+| `maple-runtime-medical` | 9021 | BraTS2020 UNet3D (T1/T1ce/T2/FLAIR), ChestXray14 (TorchXRayVision) | ✅ |
+| `maple-runtime-yolo` | 9022 | RSNA_Pneumonia_YOLO26x | - |
+| `maple-runtime-nnunet` | 9023 | nnUNet 계열 | ✅ |
 
-**컨테이너 공통 계약 (POST /run)**
+컨테이너 실행은 `maple-model-execution-server` 디렉토리에서:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up -d
+```
+
+**컨테이너 공통 계약 (POST /run/v2)**
 
 ```json
-// Request
+// Request — RSNA Pneumonia YOLO26x (DICOM 흉부 X-ray, 폐렴 탐지)
 {
-  "image_path": "/data/input/Rheumatology/.../image.dcm",
-  "roi": {"left": [x1, y1, x2, y2], "right": [x1, y1, x2, y2]},
-  "model_path": "/AI_Models/.../checkpoint"
+  "model_name": "RSNA_Pneumonia_YOLO26x",
+  "input_data": "/data/input/Radiology/RSNA Pneumonia YOLO26x/{ts}/image.dcm",
+  "model_path": "/app/AI_Models/Radiology/RSNA_Pneumonia_YOLO26x/checkpoint/best.pt"
 }
 
-// Response
+// Response — RSNA Pneumonia YOLO26x
 {
   "status": "ok",
-  "result_type": "image",
-  "image_b64": "...",
-  "images_b64": ["...", "..."],
-  "predictions": [{"pred": 1, "pred_name": "BME", "prob": 0.87}]
+  "model_name": "RSNA_Pneumonia_YOLO26x",
+  "result": {
+    "result_type": "image",
+    "images_b64": ["..."],
+    "predictions": [{"x1": 120, "y1": 80, "x2": 450, "y2": 390, "conf": 0.87, "pred": 1, "pred_name": "pneumonia_opacity"}],
+    "output_files": []
+  }
+}
+
+// Request — BraTS2020 T1ce UNet3D (NIfTI T1ce MRI, 뇌종양 분할)
+{
+  "model_name": "BraTS2020_T1ce_UNet3D",
+  "input_data": "/data/input/Neurology/BraTS2020 T1ce UNet3D/{ts}/sample_t1ce.nii.gz",
+  "model_path": "/app/AI_Models/Neurology/BraTS2020_T1ce_UNet3D/checkpoint/best.pt"
+}
+
+// Response — BraTS2020 T1ce UNet3D (5개 분할 이미지 반환)
+{
+  "status": "ok",
+  "model_name": "BraTS2020_T1ce_UNet3D",
+  "result": {
+    "result_type": "image",
+    "images_b64": ["...", "...", "...", "...", "..."],
+    "predictions": null,
+    "output_files": [
+      "/data/output/.../000_sample_t1ce_3D.png",
+      "/data/output/.../000_sample_t1ce_axial.png",
+      "/data/output/.../000_sample_t1ce_WT.png",
+      "/data/output/.../000_sample_t1ce_TC.png",
+      "/data/output/.../000_sample_t1ce_ET.png"
+    ]
+  }
 }
 ```
 
@@ -404,19 +463,29 @@ AI Agent 서버가 관리하며, 백엔드는 직접 접근하지 않고 Agent H
 
 **이미지 role 라벨 (Agent 해석용)**
 
-컨테이너가 이미지를 반환하면, 백엔드는 MongoDB `output_image_role` 값을 읽어 이미지에 역할 라벨을 붙여 Agent에 전달합니다.
+컨테이너가 이미지를 반환하면, 백엔드는 이미지에 역할 라벨을 붙여 Agent에 전달합니다.
+
+- 컨테이너가 `output_files`를 반환하는 경우 → **파일명을 role로 사용** (e.g. `000_sample_t1_WT.png`)
+- `output_files`가 없는 경우 → MongoDB `output_image_role` 기반으로 생성 (e.g. `segmentation_overlay_1`)
 
 ```json
-// Agent interpret에 전달되는 images 포맷
+// Agent interpret에 전달되는 images 포맷 예시 — BraTS2020 T1ce UNet3D
+// output_files 파일명이 role로 사용됨
 [
-  {"role": "bbox_overlay", "data": "data:image/png;base64,..."},
-  {"role": "gradcam_overlay_1", "data": "data:image/png;base64,..."},
-  {"role": "gradcam_overlay_2", "data": "data:image/png;base64,..."}
+  {"role": "000_sample_t1ce_3D.png",    "data": "data:image/png;base64,..."},
+  {"role": "000_sample_t1ce_axial.png", "data": "data:image/png;base64,..."},
+  {"role": "000_sample_t1ce_WT.png",    "data": "data:image/png;base64,..."},
+  {"role": "000_sample_t1ce_TC.png",    "data": "data:image/png;base64,..."},
+  {"role": "000_sample_t1ce_ET.png",    "data": "data:image/png;base64,..."}
+]
+
+// RSNA Pneumonia YOLO26x — output_files 없음 → output_image_role 기반
+[
+  {"role": "bbox_overlay", "data": "data:image/png;base64,..."}
 ]
 ```
 
-이미지가 1장이면 `output_image_role` 그대로, N장이면 `output_image_role_1` ~ `output_image_role_N`으로 자동 부여됩니다.
-Agent는 이 role을 기준으로 임상 해석 텍스트에 `[IMG:role]` 토큰을 삽입하고, 프론트엔드는 해당 토큰 위치에 이미지를 인라인으로 렌더링합니다.
+Agent는 이 role을 임상 해석 텍스트에 `[IMG:role]` 토큰으로 삽입하고, 프론트엔드는 해당 위치에 이미지를 인라인으로 렌더링합니다.
 
 ---
 
@@ -426,9 +495,14 @@ Agent는 이 role을 기준으로 임상 해석 텍스트에 `[IMG:role]` 토큰
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB 연결 URI |
-| `DB_NAME` | `projects_db` | 데이터베이스명 |
-| `AGENT_URL` | `http://localhost:8001` | AI Agent 서비스 URL (SSH 터널 경유, NHN Cloud B200:8001) |
+| `MONGO_URL` | `mongodb://localhost:27017` | MongoDB 연결 URI |
+| `DB_NAME` | `maple_db` | 데이터베이스명 |
+| `MAIN_DOCUMENT_ID` | *(필수, `.env` 설정)* | MongoDB `departments` 컬렉션 문서 ObjectId |
+| `AGENT_URL` | `http://localhost:8101` | AI Agent 서비스 URL (SSH 터널 경유) |
+| `AGENT_TIMEOUT` | `300` | Agent 요청 타임아웃 (초) |
+| `MAPLE_INFERENCE_URL` | `http://localhost:8110` | AI 추론 서버(로컬) URL |
+| `MAPLE_REMOTE_INFERENCE_URL` | *(선택)* | AI 추론 서버(원격) URL |
+| `AI_MODELS_DIR` | `../maple-model-execution-server/AI_Models` | AI 모델 루트 디렉토리 |
 
 > AI 모델 컨테이너의 URL은 MongoDB `departments` 컬렉션의 `docker.service_url` 필드에서 읽습니다.
 
@@ -468,23 +542,23 @@ API 문서: http://localhost:8000/docs
 
 ### AI 모델 컨테이너 실행 (Docker)
 
-AI 모델 컨테이너는 `docker-compose.yml`로 관리합니다.
+AI 모델 컨테이너는 `maple-model-execution-server`에서 관리합니다.
 
 ```bash
-# 전체 빌드 및 실행
-docker-compose up -d --build
+cd maple-model-execution-server
 
-# 특정 컨테이너만 실행
-docker-compose up -d si-joint-detector
-docker-compose up -d bme-classifier
-docker-compose up -d parkinson-gait
-docker-compose up -d nnunet-smwi
+# 런타임 컨테이너 전체 빌드 및 실행
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up -d --build
+
+# 특정 런타임만 실행
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up -d runtime-yolo
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up -d runtime-medical
 
 # 로그 확인
-docker-compose logs -f {서비스명}
+docker compose logs -f runtime-yolo
 
 # 중지
-docker-compose down
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml down
 ```
 
 > 백엔드 서버 자체는 현재 Docker로 별도 실행하지 않고 로컬에서 uvicorn으로 실행합니다.
@@ -547,20 +621,23 @@ docker-compose down
 
 ```python
 # 현재 등록된 파이프라인 자동 전환 목록
+# 현재 모든 모델이 standalone이므로 비어 있음
 PIPELINE_REQUIRED = {
-    ("Rheumatology", "BME Classification"): [
-        {"step": 1, "department": "Rheumatology", "project": "SI Joints Detection"},
-        {"step": 2, "department": "Rheumatology", "project": "BME Classification"},
-    ],
+    # 다단계 파이프라인이 필요한 프로젝트는 여기에 등록
+    # 예시:
+    # ("Neurology", "Multi-Modal Segmentation"): [
+    #     {"step": 1, "department": "Neurology", "project": "BraTS2020 T1 UNet3D"},
+    #     {"step": 2, "department": "Neurology", "project": "BraTS2020 T1ce UNet3D"},
+    # ],
 }
 ```
 
-새 프로젝트가 파이프라인을 필요로 하면 이 딕셔너리에 추가해야 합니다.
+새 프로젝트가 다단계 파이프라인을 필요로 하면 이 딕셔너리에 추가해야 합니다.
 
 ```
-예시: BME Classification
-Step 1  →  SI Joints Detection  →  ROI 좌표 반환
-Step 2  →  BME Classification   →  ROI를 입력으로 받아 GradCAM 반환
+예시: Multi-Modal Brain Tumor Segmentation
+Step 1  →  BraTS2020 T1 UNet3D   →  T1 분할 결과
+Step 2  →  BraTS2020 T1ce UNet3D →  T1ce 분할 결과 (앙상블용)
 ```
 
 ---
@@ -569,13 +646,16 @@ Step 2  →  BME Classification   →  ROI를 입력으로 받아 GradCAM 반환
 
 ```
 1. 연구원이 inference.py, checkpoint/, meta.json, requirements.txt, sample_data/ 제출
-2. 관리자가 server.py, Dockerfile 작성
-3. docker-compose.yml에 서비스 추가 (포트 배정)
-4. meta.json의 docker.service_url 기입
-5. POST /admin/models/{department}/{project} 로 MongoDB 등록
-   └── 백엔드가 자동으로 POST /agent/models/register 호출
+2. 관리자가 runner.py, config.yaml 작성 (maple-model-execution-server/models/{model_name}/)
+3. meta.json의 docker.service_url에 해당 런타임 컨테이너 URL 기입
+   (예: "http://runtime-medical:8000" 또는 "http://runtime-yolo:8000")
+4. scan_and_register.py 실행 → AI_Models/ 스캔 후 MongoDB + ChromaDB 일괄 등록
+   cd maple-routing-server
+   python scan_and_register.py
+   └── 백엔드가 MongoDB 저장 + POST /agent/models/register 자동 호출
        └── AI Agent: Wiki 페이지 생성 + ChromaDB maple_models 등록
-6. docker-compose up -d --build {서비스명} 으로 컨테이너 실행
+5. 해당 런타임 컨테이너 재시작 (config.yaml이 동적 로드되므로 재빌드 불필요)
+   docker compose -f docker-compose.yml -f docker-compose.runtime.yml restart runtime-medical
 ```
 
 모델 삭제 시:
@@ -661,14 +741,14 @@ docker inspect {컨테이너명} | grep -A 10 Health
 **`no such service` 오류**
 
 `docker-compose.yml`이 있는 디렉토리에서 실행해야 합니다.
-AI 모델 컨테이너는 `maple-routing-server/`에 `docker-compose.yml`이 있습니다.
+AI 모델 컨테이너는 `maple-model-execution-server/`에 `docker-compose.runtime.yml`이 있습니다.
 
 ```bash
 # 올바른 경로
-cd maple-routing-server
-docker-compose up -d nnunet-smwi
+cd maple-model-execution-server
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up -d runtime-nnunet
 
-# ❌ maple-agent-server/ 등 다른 디렉토리에서 실행하면 오류
+# ❌ maple-routing-server/ 등 다른 디렉토리에서 실행하면 오류
 ```
 
 ---
@@ -695,17 +775,17 @@ RUN pip install "git+https://github.com/MIC-DKFZ/nnUNet.git@v2.6.3"
 DB에 등록된 project_name과 Agent/프론트엔드가 반환하는 이름이 다를 때 발생합니다.
 
 ```
-모델 정보 없음 - Neurology/Parkinson Gait
+모델 정보 없음 - Neurology/BraTS2020T1ceUNet3D
 ```
 
 `_find_project`는 아래 변환을 자동으로 처리합니다:
-- 언더스코어 ↔ 공백 (`ParkinsonGait_ML` ↔ `Parkinson Gait`)
+- 언더스코어 ↔ 공백 (`BraTS2020_T1ce_UNet3D` ↔ `BraTS2020 T1ce UNet3D`)
 - 대소문자 무시
 - `ml`, `model` 접미사 무시
 
 그래도 매칭이 안 된다면 DB에 저장된 `project_name` 값을 직접 확인합니다:
 ```bash
-mongosh projects_db --eval "db.departments.find({}, {'departments.department_name':1, 'departments.projects':1})"
+mongosh maple_db --eval "db.departments.find({}, {'departments.department_name':1, 'departments.projects':1})"
 ```
 
 ---

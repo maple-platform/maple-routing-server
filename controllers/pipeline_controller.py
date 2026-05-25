@@ -1,16 +1,16 @@
 import os
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional
 from services.pipeline_service import PipelineService
 from dependencies import get_pipeline_service
 
 router = APIRouter(tags=["pipeline"])
-logger = logging.getLogger("mars.pipeline.controller")
+logger = logging.getLogger("maple.pipeline.controller")
 
 SAVE_BASE_INPUT_DIR  = "./data/input"
 SAVE_BASE_OUTPUT_DIR = "./data/output"
@@ -45,7 +45,6 @@ async def run_pipeline(
     Returns:
       - step_results: 각 Step의 결과 (image_b64, predictions 등)
     """
-    import json
     try:
         steps_data = json.loads(steps)
     except Exception:

@@ -1,5 +1,5 @@
 """
-AgentService — MARS AI Agent 서버 연동 레이어.
+AgentService — Maple AI Agent 서버 연동 레이어.
 
 Back-end ↔ AI Agent (NHN Cloud B200, SSH 터널 → localhost:8001) 간
 모든 HTTP 통신을 이 서비스에서 담당한다.
@@ -10,7 +10,6 @@ Back-end ↔ AI Agent (NHN Cloud B200, SSH 터널 → localhost:8001) 간
   POST /agent/models/register — 모델 Wiki + ChromaDB 등록
   DELETE /agent/models/{model_id} — 모델 Wiki + ChromaDB 삭제
 """
-import os
 import logging
 import json
 import re
@@ -18,10 +17,9 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("mars.agent")
+from config.settings import AGENT_URL, AGENT_TIMEOUT
 
-AGENT_URL = os.getenv("AGENT_URL", "http://localhost:8001")
-AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "300"))
+logger = logging.getLogger("maple.agent")
 
 
 class AgentService:

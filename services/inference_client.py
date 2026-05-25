@@ -1,7 +1,8 @@
-import os
 from typing import Any
 
 import httpx
+
+from config.settings import INFERENCE_URL, REMOTE_INFERENCE_URL
 
 
 class InferenceServerError(Exception):
@@ -22,16 +23,16 @@ class InferenceServerClient:
             return server.rstrip("/")
 
         env_map = {
-            "local": "MEDCENTERAI_INFERENCE_URL",
-            "internal": "MEDCENTERAI_INFERENCE_URL",
-            "0": "MEDCENTERAI_INFERENCE_URL",
-            "remote": "MEDCENTERAI_REMOTE_INFERENCE_URL",
-            "external": "MEDCENTERAI_REMOTE_INFERENCE_URL",
-            "1": "MEDCENTERAI_REMOTE_INFERENCE_URL",
+            "local": "MAPLE_INFERENCE_URL",
+            "internal": "MAPLE_INFERENCE_URL",
+            "0": "MAPLE_INFERENCE_URL",
+            "remote": "MAPLE_REMOTE_INFERENCE_URL",
+            "external": "MAPLE_REMOTE_INFERENCE_URL",
+            "1": "MAPLE_REMOTE_INFERENCE_URL",
         }
-        env_name = env_map.get(str(server).lower(), "MEDCENTERAI_INFERENCE_URL")
-        default_url = "http://localhost:8010" if env_name == "MEDCENTERAI_INFERENCE_URL" else ""
-        base_url = os.getenv(env_name, default_url)
+        env_name = env_map.get(str(server).lower(), "MAPLE_INFERENCE_URL")
+        default_url = INFERENCE_URL if env_name == "MAPLE_INFERENCE_URL" else REMOTE_INFERENCE_URL
+        base_url = default_url
         if not base_url:
             raise InferenceServerError(f"추론 서버 URL을 찾을 수 없습니다. 환경변수 {env_name}를 확인하세요.")
         return base_url.rstrip("/")

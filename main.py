@@ -1,4 +1,3 @@
-import os
 import logging
 from contextlib import asynccontextmanager
 
@@ -6,9 +5,11 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
 
-load_dotenv()
+from config.settings import (
+    MONGO_URI, DB_NAME, AGENT_URL,
+    INFERENCE_URL, INFERENCE_HEALTH_PATH,
+)
 
 # ── 로깅 설정 ──────────────────────────────────────
 logging.basicConfig(
@@ -16,7 +17,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("mars")
+logger = logging.getLogger("maple")
 
 
 async def log_http_service_status(
@@ -42,11 +43,11 @@ async def log_http_service_status(
 # ── Lifespan ───────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGO_URL", "mongodb://localhost:27017")
-    db_name   = os.getenv("DB_NAME",   "projects_db")
-    agent_url = os.getenv("AGENT_URL", "http://localhost:8001")
-    inference_url = os.getenv("MEDCENTERAI_INFERENCE_URL", "http://localhost:8010")
-    inference_health_path = os.getenv("MEDCENTERAI_INFERENCE_HEALTH_PATH", "/health")
+    mongo_uri             = MONGO_URI
+    db_name               = DB_NAME
+    agent_url             = AGENT_URL
+    inference_url         = INFERENCE_URL
+    inference_health_path = INFERENCE_HEALTH_PATH
 
     logger.info("서버 시작 중...")
     logger.info(f"MongoDB 연결 중... ({mongo_uri})")
@@ -60,7 +61,7 @@ async def lifespan(app: FastAPI):
         inference_url,
         health_path=inference_health_path,
     )
-    logger.info("MARS AI Backend 서버가 준비되었습니다.")
+    logger.info("Maple AI Backend 서버가 준비되었습니다.")
     yield
     logger.info("서버 종료 중...")
     mongodb_client.close()
@@ -69,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 # ── FastAPI 앱 ─────────────────────────────────────
 app = FastAPI(
-    title="MARS AI Backend",
+    title="Maple AI Backend",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -84,7 +85,7 @@ app.add_middleware(
 # ── 헬스체크 ───────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "mars-ai-backend"}
+    return {"status": "ok", "service": "maple-ai-backend"}
 
 
 # ── 라우터 등록 ────────────────────────────────────
@@ -93,5 +94,5 @@ from routes.api import router as api_router
 app.include_router(api_router)
 logger.info("라우터 등록 완료 (/projects, /inference, /admin, /pipeline)")
 
-# uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-# http://127.0.0.1:8000/docs
+# uvicorn main:app --host 0.0.0.0 --port 8100 --reload
+# http://127.0.0.1:8100/docs

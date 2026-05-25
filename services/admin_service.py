@@ -1,15 +1,15 @@
 import os
 import re
-
+import logging
 from typing import Dict, List
 from fastapi import UploadFile
 
 from repositories.projects_repository import ProjectsRepository
 from services.agent_service import AgentService
-from models.schemas import (
-    DepartmentCreate, DepartmentUpdate,
-    ProjectCreate, ProjectUpdate
-)
+from models.schemas import DepartmentCreate
+from config.settings import AI_MODELS_DIR
+
+logger = logging.getLogger("maple.admin")
 
 def _slugify(name: str) -> str:
     """
@@ -125,7 +125,7 @@ class AdminService:
         requirements_file: UploadFile | None = None
     ):
         # 새 구조: 추론 워크스페이스의 AI_Models/{dept}/{project}/checkpoint/
-        ai_models_root = os.getenv("AI_MODELS_DIR", os.path.join("..", "mars-ai-inference", "AI_Models"))
+        ai_models_root = os.getenv("AI_MODELS_DIR", AI_MODELS_DIR)
         model_dir  = os.path.join(ai_models_root, department_name, project_name)
         base_dir   = os.path.join(model_dir, "checkpoint")
         os.makedirs(base_dir, exist_ok=True)
@@ -137,45 +137,34 @@ class AdminService:
             with open(save_path, "wb") as f:
                 f.write(content)
             saved_files[key] = os.path.join("AI_Models", department_name, project_name, "checkpoint", key)
-            print(f"✅ 모델 weight 저장됨: {save_path}")
+            logger.info(f"모델 weight 저장됨: {save_path}")
 
-        # inference.py 저장
         script_path = None
         if inference_script:
             script_path = os.path.join(model_dir, "inference.py")
             script_content = await inference_script.read()
             with open(script_path, "wb") as f:
                 f.write(script_content)
-            print(f"✅ inference.py 저장됨: {script_path}")
-            
+            logger.info(f"inference.py 저장됨: {script_path}")
+
         requirements_path = None
-        has_requirements = False
         if requirements_file is not None:
             requirements_path = os.path.join(base_dir, "requirements.txt")
             content = await requirements_file.read()
             with open(requirements_path, "wb") as f:
                 f.write(content)
-            has_requirements = True
-            print(f"✅ requirements.txt 저장됨: {requirements_path}")
-            
-            
-            # Dockerfile은 model_dir에 생성 (server.py 등과 같은 레벨)
+            logger.info(f"requirements.txt 저장됨: {requirements_path}")
+
             dockerfile_path = os.path.join(model_dir, "Dockerfile")
-            if has_requirements:
-                dockerfile_content = (
-                    "FROM python:3.10-slim\n\nWORKDIR /app\n\n"
-                    "COPY checkpoint/requirements.txt .\n"
-                    "RUN pip install --no-cache-dir -r requirements.txt\n\n"
-                    "COPY . .\n\nCMD [\"uvicorn\", \"server:app\", \"--host\", \"0.0.0.0\", \"--port\", \"9000\"]\n"
-                )
-            else:
-                dockerfile_content = (
-                    "FROM python:3.10-slim\n\nWORKDIR /app\n\n"
-                    "COPY . .\n\nCMD [\"uvicorn\", \"server:app\", \"--host\", \"0.0.0.0\", \"--port\", \"9000\"]\n"
-                )
+            dockerfile_content = (
+                "FROM python:3.10-slim\n\nWORKDIR /app\n\n"
+                "COPY checkpoint/requirements.txt .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n\n"
+                "COPY . .\n\nCMD [\"uvicorn\", \"server:app\", \"--host\", \"0.0.0.0\", \"--port\", \"9000\"]\n"
+            )
             with open(dockerfile_path, "w", encoding="utf-8") as f:
                 f.write(dockerfile_content)
-            print(f"✅ Dockerfile 생성됨: {dockerfile_path}")
+            logger.info(f"Dockerfile 생성됨: {dockerfile_path}")
 
         # Docker 이미지 이름 / 빌드 컨텍스트
         dept_slug  = _slugify(department_name)
@@ -219,6 +208,9 @@ class AdminService:
         return result
 
 
+
+    async def update_model(self, department_name: str, project_name: str, old_model_name: str, new_model_name: str):
+        return await self.projects_repo.update_model(department_name, project_name, old_model_name, new_model_name)
 
     async def delete_model(self, department_name: str, project_name: str, model_name: str):
         if not department_name.strip():

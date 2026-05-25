@@ -4,8 +4,11 @@ Control Node — 파이프라인 모델 순차 실행 서비스.
 Agent가 생성한 Execution Plan을 받아 Step별로 모델 컨테이너를 순차 호출하고
 이전 Step의 출력을 다음 Step의 입력으로 전달한다.
 """
+import os
 import logging
 import base64
+
+from config.settings import MODEL_ROOT as _DEFAULT_MODEL_ROOT
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -15,7 +18,7 @@ from services.inference_client import (
     InferenceServerTimeout,
 )
 
-logger = logging.getLogger("mars.pipeline")
+logger = logging.getLogger("maple.pipeline")
 
 
 class PipelineService:
@@ -36,7 +39,6 @@ class PipelineService:
         컨테이너 환경(MODEL_ROOT=/AI_Models)이면 컨테이너 내부 경로로 변환.
         로컬 환경이면 절대경로로 변환.
         """
-        import os
         model_info = await self.projects_repo.get_model_by_project(department, project)
         if not model_info:
             return None
@@ -46,7 +48,7 @@ class PipelineService:
         rel_path = list(model_path_dict.values())[0]  # 예: "AI_Models/Rheumatology/.../best.pt"
 
         # 컨테이너에서는 /AI_Models 볼륨 마운트, 로컬에서는 절대경로
-        model_root = os.getenv("MODEL_ROOT")
+        model_root = os.getenv("MODEL_ROOT") or _DEFAULT_MODEL_ROOT
         if model_root:
             # Docker/K8s: MODEL_ROOT 환경변수로 컨테이너 내부 경로 구성
             clean = rel_path.replace("\\", "/").lstrip("/")
@@ -125,7 +127,8 @@ class PipelineService:
                     input_data = image_path
             params = {
                 "container_url": container_url,
-                "container_endpoint": "/run",
+                "container_endpoint": "/run/v2",
+                "model_name": project,
             }
             if model_path:
                 params["model_path"] = model_path

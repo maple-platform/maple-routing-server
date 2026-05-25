@@ -15,7 +15,7 @@ from services.pipeline_service import PipelineService
 from services.agent_service import AgentService
 from dependencies import get_inference_service, get_pipeline_service, get_agent_service
 
-logger = logging.getLogger("mars.inference.controller")
+logger = logging.getLogger("maple.inference.controller")
 
 router = APIRouter(tags=["inference"])
 
@@ -26,10 +26,12 @@ LOG_TEXT_PREVIEW_LIMIT = 200
 # prediction 모드에서 파이프라인이 필요한 프로젝트 목록
 # key: (department, project) → steps 목록
 PIPELINE_REQUIRED: dict[tuple, list[dict]] = {
-    ("Rheumatology", "BME Classification"): [
-        {"step": 1, "department": "Rheumatology", "project": "SI Joints Detection"},
-        {"step": 2, "department": "Rheumatology", "project": "BME Classification"},
-    ],
+    # 다단계 파이프라인이 필요한 프로젝트는 여기에 등록
+    # 예시:
+    # ("Neurology", "Multi-Modal Segmentation"): [
+    #     {"step": 1, "department": "Neurology", "project": "BraTS2020 T1 UNet3D"},
+    #     {"step": 2, "department": "Neurology", "project": "BraTS2020 T1ce UNet3D"},
+    # ],
 }
 
 
