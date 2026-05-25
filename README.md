@@ -7,31 +7,37 @@ maple-platform의 백엔드 서버입니다.
 
 ## 시스템 구성
 
-maple-platform은 세 개의 독립적인 서버로 구성됩니다.
+maple-platform은 네 개의 독립적인 서버로 구성됩니다.
 
 ```
 [Frontend UI]  maple-client (React, Port 3000)
       │
       │  HTTP (Agent 직접 접근 불가 — 백엔드 프록시 경유)
       ▼
-[Back-end]     maple-routing-server (FastAPI, Port 8000)    ◄── 이 저장소
+[Back-end]     maple-routing-server (FastAPI, Port 8100)    ◄── 이 저장소
       │
-      ├── HTTP ──► [AI 모델 컨테이너]  maple-model-execution-server (Port 9020~9023)
+      ├── HTTP ──► [추론 게이트웨이]  maple-inference (Port 8110)
+      │             ├── runtime-basic   (외부 9020, 내부 8000)
+      │             ├── runtime-medical (외부 9021, 내부 8000)
+      │             ├── runtime-yolo    (외부 9022, 내부 8000)
+      │             └── runtime-nnunet  (외부 9023, 내부 8000)
       │
-      └── SSH터널(localhost:8001) ──► [AI Agent]  maple-agent-server (NHN Cloud B200, Port 8001)
-                                                  ├── Ollama (Port 11434, gemma4:31b)
+      └── SSH터널(localhost:8101) ──► [AI Agent]  maple-agent-server (NHN Cloud B200, Port 8101)
+                                                  ├── vLLM (Port 8003, gemma-4-31B-it, TP=2)
                                                   ├── ChromaDB (Port 8002, RAG)
                                                   └── /wiki (LLM Wiki, 지식 누적)
 ```
 
-> **중요**: 브라우저(프론트엔드)는 SSH 터널이 열린 `localhost:8001`에 직접 접근할 수 없습니다.
+> **중요**: 브라우저(프론트엔드)는 SSH 터널이 열린 `localhost:8101`에 직접 접근할 수 없습니다.
 > 프론트엔드의 모든 Agent 요청은 백엔드(`/inference/agent/*`)를 통해 프록시됩니다.
+> 컨테이너끼리 통신할 때는 내부 포트 8000 사용 (예: `http://runtime-medical:8000`)
 
 | 서버 | 저장소 | 포트 | 역할 |
 |---|---|---|---|
-| Back-end | `maple-routing-server` | 8000 | 추론 라우팅, 프로젝트 관리, 결과 저장, 파일 변환 |
-| AI Agent | `maple-agent-server` | NHN Cloud B200:8001 (SSH터널 → localhost:8001) | 모드별 쿼리 라우팅, RAG 임상 해석, 모델 검색, VLM 범용 분석 |
-| AI 모델 | `maple-model-execution-server` | 9020~9023 | 도메인 특화 AI 모델 실행 |
+| Back-end | `maple-routing-server` | 8100 | 추론 라우팅, 프로젝트 관리, 결과 저장, Agent 프록시 |
+| 추론 게이트웨이 | `maple-inference` | 8110 | 런타임 컨테이너 라우팅 (백엔드 내부용) |
+| AI Agent | `maple-agent-server` | NHN Cloud B200:8101 (SSH터널 → localhost:8101) | 모드별 쿼리 라우팅, RAG 임상 해석, 모델 검색, VLM 범용 분석 |
+| AI 모델 | `maple-model-execution-server` | 9020~9023 (내부 8000) | 도메인 특화 AI 모델 실행 |
 | Frontend | `maple-client` | 3000 | 사용자 인터페이스 |
 
 ---
@@ -159,7 +165,7 @@ maple-routing-server/
 | `POST` | `/inference/agent/plan` | Agent plan 프록시 (프론트엔드 전용) |
 | `GET` | `/inference/agent/models/lookup` | Agent 모델 조회 프록시 (프론트엔드 전용) |
 
-> `/inference/agent/*` 엔드포인트는 브라우저가 `localhost:8001`에 직접 접근할 수 없어 백엔드가 프록시 역할을 합니다.
+> `/inference/agent/*` 엔드포인트는 브라우저가 `localhost:8101`에 직접 접근할 수 없어 백엔드가 프록시 역할을 합니다.
 
 **Request (multipart/form-data)**
 
@@ -519,7 +525,7 @@ Agent는 이 role을 임상 해석 텍스트에 `[IMG:role]` 토큰으로 삽입
 
 ```bash
 # 1. SSH 터널 연결 (Agent 서버, 별도 터미널)
-ssh -L 8001:localhost:8001 maple-platform -N
+ssh -L 8101:localhost:8101 maple-platform -N
 # SSH config (~/.ssh/config) 에 maple-platform 등록 필요:
 #   Host maple-platform
 #       HostName 59.150.35.1
@@ -528,17 +534,17 @@ ssh -L 8001:localhost:8001 maple-platform -N
 #       IdentityFile "C:\Users\...\PLFM-YS_key"
 
 # 2. Agent 연결 확인
-curl http://localhost:8001/health
-# {"status":"ok","service":"maple-agent-server","ollama":"ok","chromadb":"ok"}
+curl http://localhost:8101/health
+# {"status":"ok","service":"maple-agent-server","vllm":"ok","chromadb":"ok"}
 
 # 3. 의존성 설치
 pip install -r requirements.txt
 
 # 4. 백엔드 서버 실행
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
-API 문서: http://localhost:8000/docs
+API 문서: http://localhost:8100/docs
 
 ### AI 모델 컨테이너 실행 (Docker)
 
@@ -806,13 +812,16 @@ cd maple-agent-server
 python scripts/ingest_knowledge.py
 ```
 
-**Ollama 모델 미설치**
+**vLLM 모델 미로드**
 ```
 404 model not found
 ```
-Ollama에 `gemma4:31b` 모델이 pull되어 있지 않은 경우입니다.
+vLLM 서버가 `google/gemma-4-31B-it` 모델과 함께 실행 중인지 확인합니다.
 ```bash
-ollama pull gemma4:31b
+python -m vllm.entrypoints.openai.api_server \
+  --model google/gemma-4-31B-it \
+  --tensor-parallel-size 2 \
+  --port 8003
 ```
 
 **Agent interpret 422 오류**

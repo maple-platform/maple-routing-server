@@ -231,7 +231,7 @@ class InferenceService:
         if model_path:
             params["model_path"] = model_path
 
-        logger.info("MedCenterAI 추론 서버 요청 중... (%s/%s)", department, project)
+        logger.info("Maple 추론 서버 요청 중... (%s/%s)", department, project)
         try:
             infer_result = await self.inference_client.infer(
                 model_info=model_info,
@@ -240,7 +240,7 @@ class InferenceService:
                 params=params,
             )
             container_result = self._to_container_result(infer_result)
-            logger.info(f"MedCenterAI 추론 완료 - result_type: {container_result.get('result_type')}")
+            logger.info(f"Maple 추론 완료 - result_type: {container_result.get('result_type')}")
         except InferenceServerTimeout as e:
             logger.error(f"추론 서버 타임아웃: {e}")
             return {"status": "error", "message": str(e)}
