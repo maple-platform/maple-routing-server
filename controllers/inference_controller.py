@@ -73,6 +73,7 @@ def _summarize_agent_plan_body(body: dict) -> dict:
         "uploaded_types": body.get("uploaded_types"),
         "images_count": len(body.get("images") or []),
         "csv_rows": len(body.get("csv_data") or []),
+        "attachments_count": len(body.get("attachments") or []),
     }
 
 
@@ -155,16 +156,15 @@ async def inference_endpoint(
             "sources": agent_resp.get("sources", []),
         })
 
-    # ── general 모드: 파일 변환 후 Agent VLM 종합 분석 ─────────────────────
+    # ── general 모드: 파일 정규화 후 Agent VLM 종합 분석 ───────────────────
     if mode == "general":
         uploaded_files = [f for files in file_dict.values() for f in files]
-        images, csv_data = await inference_service.convert_files_for_general(uploaded_files)
+        attachments = await inference_service.build_attachments(uploaded_files)
 
         agent_resp = await agent_service.plan(
             mode="general",
             query=query,
-            images=images,
-            csv_data=csv_data,
+            attachments=attachments,
         )
         return JSONResponse({
             "status":  agent_resp.get("status", "success"),
@@ -213,6 +213,9 @@ async def inference_endpoint(
 
     # 파일 저장
     await _save_uploaded_files(file_dict, save_input_dir)
+
+    # 원본 스캔 메타데이터 추출 (interpret에서 임상 해석 근거로 사용, 렌더 없이)
+    attachments_meta = await inference_service.extract_attachments_meta(save_input_dir)
 
     # Agent plan — prediction 실행 계획 수립
     uploaded_files = [f for files in file_dict.values() for f in files]
@@ -293,6 +296,7 @@ async def inference_endpoint(
             execution_context={
                 "mode": "prediction",
                 "plan": agent_plan.get("plan") or agent_plan,
+                "attachments_meta": attachments_meta,
             },
         )
         logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))
@@ -351,6 +355,7 @@ async def inference_endpoint(
         execution_context={
             "mode": "prediction",
             "plan": agent_plan.get("plan") or agent_plan,
+            "attachments_meta": attachments_meta,
         },
     )
     logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))

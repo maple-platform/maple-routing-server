@@ -359,92 +359,65 @@ class InferenceService:
     # general 모드 파일 변환
     # ────────────────────────────────────────────────
 
-    async def convert_files_for_general(
-        self,
-        files: list,
-    ) -> tuple[list[str], list[dict]]:
+    async def build_attachments(self, files: list) -> list[dict]:
         """
-        general 모드 전용 파일 변환.
-        파일을 디스크에 저장하지 않고 메모리에서 직접 변환해 Agent에 전달한다.
+        general 모드 전용 — 업로드 파일들을 attachments[] 계약으로 정규화.
+
+        각 파일을 핸들러 레지스트리로 {type, images, text, metadata, tabular}
+        형태로 변환하고, 요청 단위 이미지 토큰 예산을 적용한다.
+        파일은 디스크에 저장하지 않고 메모리에서 처리한다.
 
         Returns:
-            images:   base64 인코딩된 PNG 문자열 리스트 (data:image/png;base64,...)
-            csv_data: CSV를 dict 리스트로 변환한 결과
+            attachments: NormalizedAttachment.to_dict() 리스트
         """
-        import pydicom
+        from services.attachments import apply_image_budget, normalize_attachment
+        from config.settings import AGENT_MAX_IMAGES
 
-        images: list[str]   = []
-        csv_data: list[dict] = []
-
+        normalized = []
         for file in files:
-            filename = (file.filename or "").lower()
-            content  = await file.read()
+            content = await file.read()
+            na = await normalize_attachment(
+                file.filename or "",
+                content,
+                getattr(file, "content_type", "") or "",
+            )
+            if na is not None:
+                normalized.append(na)
 
-            if filename.endswith((".dcm", ".dicom")):
-                # DICOM → PIL Image → PNG base64
-                try:
-                    ds  = pydicom.dcmread(BytesIO(content))
-                    arr = ds.pixel_array.astype("float32")
-                    # 0~255 정규화
-                    arr_min, arr_max = arr.min(), arr.max()
-                    if arr_max > arr_min:
-                        arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-                    pil = Image.fromarray(arr.astype("uint8"))
-                    if pil.mode != "RGB":
-                        pil = pil.convert("RGB")
-                    buf = BytesIO()
-                    pil.save(buf, format="PNG")
-                    b64 = base64.b64encode(buf.getvalue()).decode()
-                    images.append(f"data:image/png;base64,{b64}")
-                except Exception as e:
-                    logger.warning(f"DICOM 변환 실패 ({file.filename}): {e}")
+        dropped = apply_image_budget(normalized, AGENT_MAX_IMAGES)
+        logger.info(
+            "attachments 구성 완료: %d건 | images=%d | dropped=%d",
+            len(normalized),
+            sum(len(a.images) for a in normalized),
+            dropped,
+        )
+        return [na.to_dict() for na in normalized]
 
-            elif filename.endswith((".nii", ".gz")):
-                # NIfTI → 중간 슬라이스 PNG base64
-                try:
-                    import nibabel as nib
-                    import tempfile, os as _os
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".nii.gz") as tmp:
-                        tmp.write(content)
-                        tmp_path = tmp.name
-                    img   = nib.load(tmp_path)
-                    data  = img.get_fdata()
-                    _os.unlink(tmp_path)
-                    # 3D면 중간 슬라이스, 2D면 그대로
-                    if data.ndim == 3:
-                        mid = data.shape[2] // 2
-                        slice2d = data[:, :, mid]
-                    else:
-                        slice2d = data
-                    arr_min, arr_max = slice2d.min(), slice2d.max()
-                    if arr_max > arr_min:
-                        slice2d = (slice2d - arr_min) / (arr_max - arr_min) * 255.0
-                    pil = Image.fromarray(slice2d.astype("uint8")).convert("RGB")
-                    buf = BytesIO()
-                    pil.save(buf, format="PNG")
-                    b64 = base64.b64encode(buf.getvalue()).decode()
-                    images.append(f"data:image/png;base64,{b64}")
-                except Exception as e:
-                    logger.warning(f"NIfTI 변환 실패 ({file.filename}): {e}")
+    async def extract_attachments_meta(self, save_input_dir: Path) -> list[dict]:
+        """
+        prediction interpret용 — 저장된 원본에서 메타데이터만 추출 (렌더 없이).
 
-            elif filename.endswith((".png", ".jpg", ".jpeg")):
-                # 이미지 → base64
-                try:
-                    pil = Image.open(BytesIO(content)).convert("RGB")
-                    buf = BytesIO()
-                    pil.save(buf, format="PNG")
-                    b64 = base64.b64encode(buf.getvalue()).decode()
-                    images.append(f"data:image/png;base64,{b64}")
-                except Exception as e:
-                    logger.warning(f"이미지 변환 실패 ({file.filename}): {e}")
+        Returns:
+            [{"type": ..., "filename": ..., "metadata": {...}}, ...]
+        """
+        from services.attachments import extract_metadata, find_handler
 
-            elif filename.endswith(".csv"):
-                # CSV → dict 리스트
-                try:
-                    import io
-                    df = pd.read_csv(io.BytesIO(content))
-                    csv_data.extend(df.to_dict(orient="records"))
-                except Exception as e:
-                    logger.warning(f"CSV 파싱 실패 ({file.filename}): {e}")
-
-        return images, csv_data
+        metas: list[dict] = []
+        for path in sorted(p for p in save_input_dir.rglob("*") if p.is_file()):
+            handler = find_handler(path.name)
+            if handler is None:
+                continue
+            try:
+                content = path.read_bytes()
+            except Exception as e:
+                logger.warning("원본 읽기 실패 (%s): %s", path, e)
+                continue
+            md = await extract_metadata(path.name, content)
+            if md:
+                metas.append({
+                    "type":     getattr(handler, "type", "unknown"),
+                    "filename": path.name,
+                    "metadata": md,
+                })
+        logger.info("attachments_meta 추출: %d건", len(metas))
+        return metas
