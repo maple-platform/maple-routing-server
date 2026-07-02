@@ -67,6 +67,7 @@ class AgentService:
         uploaded_types: list[str] | None = None,
         images: list[str] | None = None,
         csv_data: list[dict] | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """
         Agent에 실행 계획 요청.
@@ -76,9 +77,11 @@ class AgentService:
             query: 사용자 자연어 요청
             department: prediction 모드 전용
             project: prediction 모드 전용
-            uploaded_types: auto 모드 — 업로드된 파일 타입 목록 (예: ["dicom"])
-            images: general 모드 — base64 인코딩된 이미지 목록
-            csv_data: general 모드 — CSV를 dict로 변환한 리스트
+            uploaded_types: prediction/auto 모드 — 업로드된 파일 타입 목록 (예: ["dicom"])
+            images: (레거시) general 모드 — base64 인코딩된 이미지 목록
+            csv_data: (레거시) general 모드 — CSV를 dict로 변환한 리스트
+            attachments: general 모드 — 정규화된 첨부 목록
+                         [{type, filename, images, text, metadata, tabular}, ...]
 
         Returns:
             Agent 응답 dict. 실패 시 {"status": "error", "message": ...}
@@ -94,6 +97,8 @@ class AgentService:
             payload["images"] = images
         if csv_data is not None:
             payload["csv_data"] = csv_data
+        if attachments is not None:
+            payload["attachments"] = attachments
 
         logger.info(f"[Agent] POST /agent/plan — mode={mode}")
         try:
