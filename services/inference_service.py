@@ -4,6 +4,7 @@ from typing import Dict, Any
 from config.settings import MODEL_ROOT as _DEFAULT_MODEL_ROOT
 
 import os, json
+from collections import defaultdict
 import pandas as pd
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,34 @@ class InferenceService:
             return "/data/" + str(rel).replace("\\", "/")
         except ValueError:
             return abs_path
+
+    def _file_category(self, path: Path) -> str | None:
+        """저장된 파일 경로 → 입력 카테고리 (Track B 선택/검증용)."""
+        name = path.name.lower()
+        ext = path.suffix.lower()
+        if ext in (".dcm", ".dicom"):
+            return "dicom"
+        if ext == ".csv":
+            return "csv"
+        if ext == ".json":
+            return "json"
+        if ext in (".png", ".jpg", ".jpeg"):
+            return "image"
+        if ext == ".nii" or name.endswith(".nii.gz"):
+            return "nifti"
+        return None
+
+    @staticmethod
+    def _required_to_category(val: str) -> str:
+        """모델 required_data 문자열 → 입력 카테고리. 미상은 영상(dicom)으로 간주."""
+        v = str(val).lower().strip().strip('"[]\'')
+        if v == "csv":
+            return "csv"
+        if v in ("png", "jpg", "jpeg", "image"):
+            return "image"
+        if v in ("nii", "nifti", "gz"):
+            return "nifti"
+        return "dicom"  # dicom/모달·시퀀스 명칭(T2, STIR T2, MRI, x-ray 등) 및 기본값
 
     def _numpy_to_base64(self, img_array: np.ndarray) -> str:
         if img_array.ndim == 2:
@@ -132,52 +161,40 @@ class InferenceService:
         result_type  = model_info.get("result_type", "text")
         model_path = self._model_path_from_model_info(model_info)
 
-        # 2. 업로드 파일 타입 vs required_data 검증
+        # 2. 업로드 파일 분류 + required_data 엄격검증 (Track B: 선택 + 검증)
+        saved_files_all = [p for p in save_input_dir.rglob("*") if p.is_file()]
+        by_cat: dict[str, list[Path]] = defaultdict(list)
+        for p in saved_files_all:
+            cat = self._file_category(p)
+            if cat:
+                by_cat[cat].append(p)
+        uploaded_categories = set(by_cat)
+
         required_data = model_info.get("required_data", [])
-        if required_data:
-            # required_data 값을 파일 카테고리로 정규화
-            # "dicom", "dcm", "STIR T2", "Sacrum MRI" 등 → "dicom"
-            # "csv" → "csv"
-            # "png", "jpg", "image" → "image"
-            # "nii", "nifti" → "nifti"
-            def _to_category(val: str) -> str:
-                v = val.lower().strip().strip('"[]\'')
-                if v in ("dicom", "dcm", "t2", "t1", "stir t2", "fs t1",
-                         "sacrum mri", "spine mri", "cervical mri", "thoracic mri",
-                         "lumbar mri", "spine x-ray", "bone age x-ray", "mri", "x-ray"):
-                    return "dicom"
-                if v in ("csv",):
-                    return "csv"
-                if v in ("png", "jpg", "jpeg", "image"):
-                    return "image"
-                if v in ("nii", "nifti", "gz"):
-                    return "nifti"
-                return "dicom"  # 기본값: 영상 데이터로 간주
+        required_categories = (
+            {self._required_to_category(r) for r in required_data} if required_data else set()
+        )
 
-            required_categories = {_to_category(r) for r in required_data}
-
-            # 업로드된 파일 확장자 → 카테고리
-            saved_files_check = [p for p in save_input_dir.rglob("*") if p.is_file()]
-            uploaded_categories: set[str] = set()
-            for p in saved_files_check:
-                ext = p.suffix.lower()
-                if ext in (".dcm", ".dicom"):
-                    uploaded_categories.add("dicom")
-                elif ext == ".csv":
-                    uploaded_categories.add("csv")
-                elif ext in (".png", ".jpg", ".jpeg"):
-                    uploaded_categories.add("image")
-                elif ext == ".nii" or str(p).endswith(".nii.gz"):
-                    uploaded_categories.add("nifti")
-
-            if uploaded_categories and not uploaded_categories.intersection(required_categories):
+        # 엄격검증: 업로드된 파일이 있는데 required 카테고리를 하나라도 충족 못하면 거부
+        if required_categories and uploaded_categories:
+            missing = required_categories - uploaded_categories
+            if missing:
                 expected = ", ".join(sorted(required_categories))
-                got = ", ".join(sorted(uploaded_categories))
-                logger.warning(f"파일 타입 불일치 - 필요: {expected}, 업로드됨: {got}")
+                got = ", ".join(sorted(uploaded_categories)) or "없음"
+                miss = ", ".join(sorted(missing))
+                logger.warning(
+                    "파일 타입 불일치 - 필요: %s | 업로드됨: %s | 누락: %s", expected, got, miss
+                )
                 return {
                     "status": "error",
-                    "message": f"잘못된 파일 형식입니다. 이 모델은 [{expected}] 형식을 필요로 합니다. (업로드된 파일: {got})",
+                    "message": (
+                        f"잘못된 파일 형식입니다. 이 모델은 [{expected}] 형식을 필요로 합니다. "
+                        f"(업로드됨: {got} / 누락: {miss})"
+                    ),
                 }
+            extra_cats = uploaded_categories - required_categories
+            if extra_cats:
+                logger.info("required 외 파일 카테고리 무시: %s", ", ".join(sorted(extra_cats)))
 
         # 3. 컨테이너 URL 확인
         container_url = self._container_url_from_model_info(model_info)
@@ -188,35 +205,38 @@ class InferenceService:
             return {"status": "error", "message": "모델 컨테이너 URL을 찾을 수 없습니다. DB의 docker.service_url 또는 환경변수를 확인하세요."}
         logger.info(f"컨테이너 URL 확인 - {container_url}")
 
-        # 4. 입력 데이터 준비 — 저장된 파일 경로 기준으로 처리
+        # 4. 입력 데이터 준비 — required_data에 맞는 파일 선택 (Track B: 선택)
         input_data: Any = None
+        CAT_PRIORITY = ["csv", "json", "dicom", "nifti", "image"]
 
-        # 저장된 파일 중 첫 번째 파일을 확장자로 판별
-        saved_files_all = list(save_input_dir.rglob("*"))
-        saved_files_all = [p for p in saved_files_all if p.is_file()]
+        # required 카테고리를 우선 선택, 없거나 미매칭 시 업로드된 것 중 우선순위로 폴백
+        chosen_cat: str | None = None
+        for cat in CAT_PRIORITY:
+            if cat in required_categories and by_cat.get(cat):
+                chosen_cat = cat
+                break
+        if chosen_cat is None:
+            for cat in CAT_PRIORITY:
+                if by_cat.get(cat):
+                    chosen_cat = cat
+                    break
 
-        if saved_files_all:
-            # 확장자별로 분류
-            csv_files  = [p for p in saved_files_all if p.suffix.lower() == ".csv"]
-            json_files = [p for p in saved_files_all if p.suffix.lower() == ".json"]
-            img_files  = [p for p in saved_files_all if p.suffix.lower() in (".png", ".jpg", ".jpeg")]
-            dcm_files  = [p for p in saved_files_all if p.suffix.lower() in (".dcm", ".dicom")]
-            nii_files  = [p for p in saved_files_all if p.suffix.lower() == ".nii" or str(p).endswith(".nii.gz")]
-
-            if csv_files:
-                df = pd.read_csv(csv_files[0])
-                input_data = df.to_dict(orient="records")
-            elif json_files:
-                input_data = json.loads(json_files[0].read_text(encoding="utf-8"))
-            elif dcm_files:
-                input_data = self._to_container_path(dcm_files[0])
-            elif nii_files:
-                input_data = self._to_container_path(nii_files[0])
-            elif img_files:
-                input_data = self._to_container_path(img_files[0])
-            else:
-                return {"status": "error", "message": f"지원하지 않는 파일 형식: {saved_files_all[0].name}"}
-
+        if chosen_cat is not None:
+            selected = by_cat[chosen_cat]
+            if len(selected) > 1:
+                logger.info(
+                    "%s 파일 %d개 업로드 — 첫 번째 선택: %s (다중 입력은 파이프라인/포맷변환 대상)",
+                    chosen_cat, len(selected), selected[0].name,
+                )
+            if chosen_cat == "csv":
+                input_data = pd.read_csv(selected[0]).to_dict(orient="records")
+            elif chosen_cat == "json":
+                input_data = json.loads(selected[0].read_text(encoding="utf-8"))
+            else:  # dicom / nifti / image → 컨테이너 경로
+                input_data = self._to_container_path(selected[0])
+            logger.info("모델 입력 선택 — category=%s | file=%s", chosen_cat, selected[0].name)
+        elif saved_files_all:
+            return {"status": "error", "message": f"지원하지 않는 파일 형식: {saved_files_all[0].name}"}
         elif extra is not None:
             input_data = extra
 
