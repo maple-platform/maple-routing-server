@@ -31,7 +31,8 @@ DICOM·NIfTI 같은 의료 데이터부터 PNG/JPG, (향후) 음성·동영상�
 ```python
 class AttachmentHandler(Protocol):
     def can_handle(filename: str, content_type: str) -> bool: ...
-    async def parse(file) -> NormalizedAttachment: ...
+    async def parse(file) -> NormalizedAttachment: ...   # 이미지 렌더 + 메타 (general)
+    async def extract_metadata(file) -> dict: ...        # 메타만, 렌더 없이 (prediction interpret용, §3.3)
 
 REGISTRY = [
     DicomHandler(),
@@ -100,6 +101,38 @@ REGISTRY = [
 
 > **agent-server 측 책임**: `images` + `text` + `metadata`(+`tabular`)를 VLM 프롬프트로 조립.
 
+### 3.2 `uploaded_types` 병행 유지 (prediction / auto)
+
+`attachments[]`는 **general 모드 전용**이다. prediction / auto 흐름은 지금도 파일 본문 없이 `uploaded_types: list[str]`(카테고리 dedupe 집합)만 보낸다 ([inference_controller.py:227-233](../controllers/inference_controller.py#L227), [:182-186](../controllers/inference_controller.py#L182)). 두 필드는 같은 요청에 공존하지 않으므로 충돌이 없다.
+
+- **파일 타입 감지는 routing-server가 단일 소유.** agent-server는 `attachments[].type`에서 `uploaded_types`를 역산하지 않는다.
+- `uploaded_types` = 모델 매칭·자동분류용 카테고리 집합 / `attachments[].type` = 파일별 리치 타입. 역할이 달라 병행한다.
+
+### 3.3 `/agent/interpret` — 원본 스캔 메타 전달 (prediction)
+
+**문제**: prediction 흐름은 `plan → (모델 실행) → interpret` 순인데, interpret은 모델 출력물(분할 오버레이 등)만 받고 원본 스캔의 나이·성별·모달리티·시퀀스가 유실된다. "8세 vs 68세 종양 소견"은 해석 문장이 달라야 하므로 이 정보가 필요하다.
+
+**해결**: routing-server가 저장된 원본(`save_input_dir`)에서 **메타데이터만 추출**(`extract_metadata`, 이미지 렌더 없이)해 interpret의 `execution_context`에 실어 보낸다.
+
+```jsonc
+// /agent/interpret 의 execution_context 확장
+"execution_context": {
+  "mode": "prediction",
+  "plan": { ... },
+  "attachments_meta": [                    // 신규 — 원본 스캔 메타 (base64 이미지 없음, 텍스트만)
+    { "type": "dicom", "filename": "brats_t1.dcm",
+      "metadata": { "modality": "MR", "age": "008Y", "sex": "F", "body_part": "BRAIN" } }
+  ]
+}
+```
+
+- `attachments_meta`는 **이미지 없이 메타만** — interpret 페이로드를 가볍게 유지. 표시 이미지는 모델 출력물로 별도 전달됨.
+- agent-server: `InterpretRequest` 스키마에 `execution_context.attachments_meta` 수용 필드 추가.
+
+### 3.4 clinical 모드 — 첨부 없음
+
+clinical 모드는 순수 지식 Q&A로, **첨부파일이 들어오지 않는다.** maple-client가 clinical에서 파일 첨부 UI를 원천 차단하며, routing / agent-server는 clinical 요청에 첨부가 없다고 가정한다. (maple-client 작업 항목)
+
 ---
 
 ## 4. 핸들러 스펙 (현재 구현 대상 5종)
@@ -117,6 +150,15 @@ REGISTRY = [
 - 기존 "중앙 1슬라이스만" 방식([inference_service.py:414](../services/inference_service.py#L414)) 폐기.
 - **3면 대표 슬라이스**(axial/coronal/sagittal 중앙)로 렌더링해 3D 구조 정보를 보존.
 - 추후 질의 기반 슬라이스 선택이 필요하면, 라우팅 서버에 "N번 슬라이스 렌더" 엔드포인트를 추가하는 방식으로 확장 (원본을 Agent로 보내지 않음).
+
+### 이미지 토큰 예산
+
+vLLM `max-model-len = 8192`는 **입력(프롬프트+이미지) + 출력 총합의 하드 리밋**이다. 초과 시 에러 또는 이미지/텍스트 truncation → 해석 오류. 또한 Gemma 3 계열은 pan-and-scan으로 큰/비정방형 이미지를 여러 크롭(각 256토큰)으로 쪼개므로 이미지 토큰이 장당 고정이 아니다.
+
+**정책 — 예산 인지형 (인위적 저상한 없음)**:
+- 1~2 파일 등 일반 케이스는 **3면 전부 전송** (다 쓴다).
+- routing이 토큰을 추정해 요청이 **천장을 넘길 때만** 파일당 axial 1면으로 자동 강등. 메타데이터는 항상 유지.
+- **agent-server 레버**: Gemma 3는 128k까지 지원. B200 VRAM 여유가 있으면 `max-model-len`을 상향해 예산 자체를 넓힐 수 있음 (agent-server config 결정).
 
 ---
 
@@ -196,4 +238,9 @@ REGISTRY = [
 | 7 | 비식별화 | 화이트리스트 추출: 나이·성별·체중·촬영맥락 유지, 이름·DOB원본·원본ID 제거/치환, 90+ 비닝 |
 | 8 | 구현 범위 | DICOM/NIfTI/PNG/JPG/CSV 지금, audio/video 인터페이스만 |
 | 9 | Track B | (a) 선택+엄격검증 시작, 필요 모델만 (b) 포맷변환 추가 |
-| 10 | ASR 위치(B) | 미정 — 위임형/자립형 둘 다 수용하는 인터페이스로 보류 |
+| 10 | ASR 위치 | 미정 — 위임형/자립형 둘 다 수용하는 인터페이스로 보류 |
+| 11 | uploaded_types | prediction/auto용으로 병행 유지, 타입 감지는 routing 단일 소유 (§3.2) |
+| 12 | interpret 메타 | `execution_context.attachments_meta`로 원본 스캔 메타 전달, 핸들러에 `extract_metadata()` 추가 (§3.3) |
+| 13 | 이미지 토큰 | 예산 인지형 — 기본 3면 전송, 천장 초과시만 axial 강등. agent-server가 max-model-len 상향 가능 (§4) |
+| 14 | clinical 첨부 | 프론트에서 원천 차단, 첨부 없다고 가정 (§3.4) |
+| 15 | 모델 매칭(C) | body_part/modality 활용은 백로그 — A3 메타 추출 후 후속 |
