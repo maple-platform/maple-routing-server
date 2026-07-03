@@ -48,31 +48,14 @@ class InferenceService:
 
     def _file_category(self, path: Path) -> str | None:
         """저장된 파일 경로 → 입력 카테고리 (Track B 선택/검증용)."""
-        name = path.name.lower()
-        ext = path.suffix.lower()
-        if ext in (".dcm", ".dicom"):
-            return "dicom"
-        if ext == ".csv":
-            return "csv"
-        if ext == ".json":
-            return "json"
-        if ext in (".png", ".jpg", ".jpeg"):
-            return "image"
-        if ext == ".nii" or name.endswith(".nii.gz"):
-            return "nifti"
-        return None
+        from services.file_categories import file_category
+        return file_category(path)
 
     @staticmethod
     def _required_to_category(val: str) -> str:
         """모델 required_data 문자열 → 입력 카테고리. 미상은 영상(dicom)으로 간주."""
-        v = str(val).lower().strip().strip('"[]\'')
-        if v == "csv":
-            return "csv"
-        if v in ("png", "jpg", "jpeg", "image"):
-            return "image"
-        if v in ("nii", "nifti", "gz"):
-            return "nifti"
-        return "dicom"  # dicom/모달·시퀀스 명칭(T2, STIR T2, MRI, x-ray 등) 및 기본값
+        from services.file_categories import required_to_category
+        return required_to_category(val)
 
     def _numpy_to_base64(self, img_array: np.ndarray) -> str:
         if img_array.ndim == 2:
@@ -407,6 +390,36 @@ class InferenceService:
         dropped = apply_image_budget(normalized, AGENT_MAX_IMAGES)
         logger.info(
             "attachments 구성 완료: %d건 | images=%d | dropped=%d",
+            len(normalized),
+            sum(len(a.images) for a in normalized),
+            dropped,
+        )
+        return [na.to_dict() for na in normalized]
+
+    async def build_attachments_from_dir(self, save_input_dir: Path) -> list[dict]:
+        """
+        저장된 원본 디렉터리에서 attachments[] 정규화.
+
+        general 에이전틱 흐름은 모델 실행을 위해 파일을 먼저 디스크에 저장하므로,
+        업로드 스트림 대신 저장된 원본을 읽어 정규화한다. (build_attachments와 동일 산출)
+        """
+        from services.attachments import apply_image_budget, normalize_attachment
+        from config.settings import AGENT_MAX_IMAGES
+
+        normalized = []
+        for path in sorted(p for p in save_input_dir.rglob("*") if p.is_file()):
+            try:
+                content = path.read_bytes()
+            except Exception as e:
+                logger.warning("원본 읽기 실패 (%s): %s", path, e)
+                continue
+            na = await normalize_attachment(path.name, content)
+            if na is not None:
+                normalized.append(na)
+
+        dropped = apply_image_budget(normalized, AGENT_MAX_IMAGES)
+        logger.info(
+            "attachments(dir) 구성 완료: %d건 | images=%d | dropped=%d",
             len(normalized),
             sum(len(a.images) for a in normalized),
             dropped,
