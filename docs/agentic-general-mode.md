@@ -102,9 +102,58 @@ ChromaDB 모델 탐색   Res  → DAG 실행 (병렬+순차)      Res  → VLM �
 
 ---
 
-## 6. 후속 (#7) — interpret 계약 확장
+## 6. provides/requires 네이밍 규약 (정확 문자열 일치)
 
-집계 후 종합 판독을 위해 `/agent/interpret`가 **원본 이미지 채널**을 받아야 한다.
-현재 `execution_context.attachments_meta`(메타만)는 전달되나, 원본 스캔 이미지는 미전달.
-`InterpretRequest`에 원본 이미지 채널 추가 후, controller가 attachments의 images를 실어 보낸다.
-(원본이미지 + 메타 + 집계 모델결과·XAI → VLM 통합 해석)
+agent가 `requires ⊆ 선행 provides` 매칭으로 depends_on을 도출하므로 문자열이 완전히 일치해야 한다.
+- **소문자 snake_case**, **역량(artifact) 기반**(모델명 금지), 패턴 **`<대상>_<산출물>`**
+- 산출물 ∈ `{roi, bbox, mask, seg, crop, heatmap, keypoints}`
+- provider의 `provides` == consumer의 `requires` (완전 동일 문자열)
+
+```jsonc
+// SI Joints Detection  → "provides": ["sij_roi"], "requires": []
+// BME Classification   → "provides": [],          "requires": ["sij_roi"]
+```
+
+## 7. interpret 호출 스키마
+
+라우팅이 `/agent/interpret`에 보내는 형태:
+```jsonc
+{
+  "query": "...",
+  "step_results": [
+    {
+      "step": "s1",                 // = step_id
+      "model": "BME Classification",
+      "result_type": "image",       // 컨테이너 실제값
+      "predictions": [{"pred":1,"pred_name":"BME","prob":0.92}],  // 예측·확률
+      "model_output": { "roi":[...], /* XAI 비이미지·중간객체 */ },
+      "images": [{"role":"gradcam","data":"data:image/png;base64,..."}]  // 결과이미지·GradCAM
+    }
+  ],
+  "execution_context": {
+    "mode": "general",
+    "plan": { "steps": [...] },
+    "attachments_meta": [{"type":"dicom","filename":"...","metadata":{...}}]  // 원본 메타(현재)
+  }
+}
+```
+**필드 매핑**: 예측·확률→`step_results[].predictions`, 결과이미지·GradCAM→`step_results[].images(role,data)`,
+XAI 비이미지→`step_results[].model_output`, 원본메타→`execution_context.attachments_meta`.
+
+### #7 후속 — 원본 이미지 채널
+종합 판독을 위해 `InterpretRequest`에 원본 스캔 이미지 채널 추가:
+```jsonc
+  "execution_context": {
+    ...,
+    "attachments": [   // 원본 스캔 (이미지+메타 통합) — 최종적으로 attachments_meta 대체
+      {"type":"dicom","filename":"...","images":["data:image/png;base64,..."],"metadata":{...}}
+    ]
+  }
+```
+원본이미지 → `execution_context.attachments[].images`. 전환기엔 `attachments_meta`와 병존.
+
+## 8. 집계(step_results) 구조
+
+DAG 결과 = **step별 1엔트리 평탄 리스트**(step_id 정렬). 병렬/순차 구조는 `plan.steps[].depends_on`에 존재.
+`run_dag` 반환: `{status: success|partial, result_type:"pipeline", step_results:[...], errors:[{step_id,error}]}`.
+step_entry 원형: `{step_id, step, model, department, task_type, result_type, predictions, model_output, image_b64, images_b64, images[]}`.
