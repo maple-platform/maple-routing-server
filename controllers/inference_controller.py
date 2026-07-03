@@ -225,14 +225,13 @@ async def inference_endpoint(
             }
             for s in step_results
         ]
-        attachments_meta = await inference_service.extract_attachments_meta(save_input_dir)
         interpret_result = await agent_service.interpret(
             query=query,
             step_results=interpret_steps,
             execution_context={
                 "mode": "general",
                 "plan": plan,
-                "attachments_meta": attachments_meta,
+                "attachments": attachments,   # 원본 스캔 이미지 + 메타 (§1에서 이미 빌드)
             },
         )
 
@@ -299,8 +298,8 @@ async def inference_endpoint(
     # 파일 저장
     await _save_uploaded_files(file_dict, save_input_dir)
 
-    # 원본 스캔 메타데이터 추출 (interpret에서 임상 해석 근거로 사용, 렌더 없이)
-    attachments_meta = await inference_service.extract_attachments_meta(save_input_dir)
+    # 원본 스캔 attachments (interpret에 원본 이미지 + 메타 전달 → VLM 종합판독)
+    attachments = await inference_service.build_attachments_from_dir(save_input_dir)
 
     # Agent plan — prediction 실행 계획 수립
     uploaded_files = [f for files in file_dict.values() for f in files]
@@ -381,7 +380,7 @@ async def inference_endpoint(
             execution_context={
                 "mode": "prediction",
                 "plan": agent_plan.get("plan") or agent_plan,
-                "attachments_meta": attachments_meta,
+                "attachments": attachments,
             },
         )
         logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))
@@ -440,7 +439,7 @@ async def inference_endpoint(
         execution_context={
             "mode": "prediction",
             "plan": agent_plan.get("plan") or agent_plan,
-            "attachments_meta": attachments_meta,
+            "attachments": attachments,
         },
     )
     logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))

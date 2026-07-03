@@ -140,17 +140,20 @@ agent가 `requires ⊆ 선행 provides` 매칭으로 depends_on을 도출하므�
 **필드 매핑**: 예측·확률→`step_results[].predictions`, 결과이미지·GradCAM→`step_results[].images(role,data)`,
 XAI 비이미지→`step_results[].model_output`, 원본메타→`execution_context.attachments_meta`.
 
-### #7 후속 — 원본 이미지 채널
-종합 판독을 위해 `InterpretRequest`에 원본 스캔 이미지 채널 추가:
+### #7 — 원본 이미지 채널 (구현 완료)
+종합 판독이 원본 스캔까지 보도록 `interpret` 호출에 원본 이미지+메타를 전달한다.
+general·prediction 세 interpret 호출부 모두 `execution_context.attachments[]`로 전송:
 ```jsonc
   "execution_context": {
     ...,
-    "attachments": [   // 원본 스캔 (이미지+메타 통합) — 최종적으로 attachments_meta 대체
+    "attachments": [   // 원본 스캔 (이미지+메타 통합)
       {"type":"dicom","filename":"...","images":["data:image/png;base64,..."],"metadata":{...}}
     ]
   }
 ```
-원본이미지 → `execution_context.attachments[].images`. 전환기엔 `attachments_meta`와 병존.
+- 원본이미지 → `execution_context.attachments[].images`, 원본메타 → `attachments[].metadata`.
+- agent-server: `attachments` 있으면 사용, 없으면 `attachments_meta`로 폴백 (전환기 병존).
+- 라우팅은 `build_attachments_from_dir(save_input_dir)`로 저장된 원본에서 빌드해 전송.
 
 ## 8. 집계(step_results) 구조
 
