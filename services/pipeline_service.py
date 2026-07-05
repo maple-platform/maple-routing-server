@@ -117,43 +117,17 @@ class PipelineService:
         if seen != len(by_id):
             raise ValueError("depends_on 사이클 감지 — 실행 계획이 DAG가 아님")
 
-    def _convert_to_png(self, src: Path, out_dir: Path) -> Path | None:
-        """
-        dicom/nifti 원본 → 대표 슬라이스 PNG 파일 (image 요구 모델용, Track B 포맷 정합).
-        attachments 핸들러의 렌더링(windowing 등)을 재사용한다.
-        """
-        import base64 as _b64
-        from services.attachments.handlers import DicomHandler, NiftiHandler
-        from services.file_categories import file_category
-
-        cat = file_category(src)
-        handler = DicomHandler() if cat == "dicom" else NiftiHandler() if cat == "nifti" else None
-        if handler is None:
-            return None
-        try:
-            na = handler._parse_sync(src.name, src.read_bytes())
-            if not na.images:
-                return None
-            data_uri = na.images[0]  # 첫(axial) 슬라이스
-            b64 = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / f"{src.stem}.png"
-            out_path.write_bytes(_b64.b64decode(b64))
-            return out_path
-        except Exception as e:
-            logger.warning("PNG 변환 실패 (%s): %s", src, e)
-            return None
-
     def _resolve_step_input(self, step: dict, saved_files: list[Path], dep_results: dict, save_input_dir: Path):
         """
-        step 입력 구성 (Track B: 선택 + 포맷 정합).
+        step 입력 구성 (Track B: 선택 + 포맷 정합, 변환 레지스트리 기반).
         - required 카테고리 직접 매칭 우선
-        - image 요구인데 영상 원본만 있으면 DICOM/NIfTI → PNG 변환
+        - 없으면 (원본→목표) 변환 레지스트리 조회해 변환 (예: dicom→png)
         - required 없으면 업로드 우선순위 폴백
         - 의존: 선행 출력의 ROI 병합
         변환/매칭 불가 시 None → run_dag가 skip + errors[] 기록
         """
-        from services.file_categories import categorize, required_to_category, select_input_file
+        from services.file_categories import CAT_PRIORITY, categorize, required_to_category, select_input_file
+        from services.format_convert import convert as convert_format, get_converter
 
         by_cat = categorize(saved_files)
         required = {required_to_category(r) for r in (step.get("required_data") or [])}
@@ -161,19 +135,26 @@ class PipelineService:
 
         base: Path | None = None
         if required:
-            for cat in ("csv", "json", "dicom", "nifti", "image"):
+            # 1) required 카테고리 직접 매칭
+            for cat in CAT_PRIORITY:
                 if cat in required and by_cat.get(cat):
                     base = by_cat[cat][0]
                     break
-            # image 요구인데 맞는 파일 없음 → 영상 원본을 PNG로 변환
-            if base is None and "image" in required:
-                for src_cat in ("dicom", "nifti"):
-                    if by_cat.get(src_cat):
-                        conv = self._convert_to_png(by_cat[src_cat][0], save_input_dir / "_converted" / sid)
+            # 2) 변환 레지스트리: (원본 카테고리 → 목표) 변환기 조회
+            if base is None:
+                out_dir = save_input_dir / "_converted" / sid
+                for target in required:
+                    for src_cat in CAT_PRIORITY:
+                        src_files = by_cat.get(src_cat)
+                        if not src_files or not get_converter(src_cat, target):
+                            continue
+                        conv = convert_format(src_files[0], src_cat, target, out_dir)
                         if conv:
-                            logger.info("[DAG %s] %s→PNG 변환 입력: %s", sid, src_cat, conv.name)
+                            logger.info("[DAG %s] 포맷 변환 %s→%s: %s", sid, src_cat, target, conv.name)
                             base = conv
                             break
+                    if base:
+                        break
         else:
             base = select_input_file(saved_files, [])
 
