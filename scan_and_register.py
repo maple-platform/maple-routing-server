@@ -155,6 +155,7 @@ def build_model_info(dept: str, project: str, meta: dict) -> dict:
         "requires":          meta.get("requires", []),   # DAG: 이 모델이 선행으로 요구하는 태그
         "task_type":         meta.get("task_type", ""),
         "result_type":       meta.get("result_type", "text"),
+        "output_image_role": meta.get("output_image_role"),  # interpret [IMG:role] 태깅용
         "inference_script":  inference_script,
         "inference_server":  meta.get("inference_server", "local"),
         "endpoint":          meta.get("endpoint", "/infer"),

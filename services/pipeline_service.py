@@ -189,13 +189,22 @@ class PipelineService:
                 )
             images_field.append(entry)
 
+        # result_type coalesce: 컨테이너가 안 주면 DB 메타 → plan step → 이미지/예측 유무로 유도.
+        # (agent interpret 스키마가 result_type을 필수 문자열로 받으므로 null 금지)
+        result_type = (
+            result.get("result_type")
+            or model_info.get("result_type")
+            or step.get("result_type")
+            or ("image" if images_field else "text")
+        )
+
         step_entry: dict = {
             "step_id":      sid,
             "step":         step.get("step"),
             "model":        project,
             "department":   dept,
             "task_type":    step.get("task_type"),
-            "result_type":  result.get("result_type"),
+            "result_type":  result_type,
             "predictions":  result.get("predictions"),
             "model_output": {
                 k: v for k, v in result.items()
@@ -206,7 +215,7 @@ class PipelineService:
         }
         if images_field:
             step_entry["images"] = images_field
-        logger.info("[DAG %s] 완료 - result_type=%s", sid, result.get("result_type"))
+        logger.info("[DAG %s] 완료 - result_type=%s", sid, result_type)
         return step_entry
 
     async def run_dag(
@@ -394,11 +403,18 @@ class PipelineService:
                         img_entry["role"] = output_image_role
                 images_field.append(img_entry)
 
+            # result_type coalesce (interpret 스키마 필수 문자열 → null 금지)
+            result_type = (
+                result.get("result_type")
+                or model_info.get("result_type")
+                or ("image" if images_field else "text")
+            )
+
             # Step 결과 기록
             step_entry: dict = {
                 "step":        step_num,
                 "model":       project,
-                "result_type": result.get("result_type"),
+                "result_type": result_type,
                 "predictions": result.get("predictions"),
                 "model_output": {
                     k: v for k, v in result.items()
