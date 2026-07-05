@@ -54,6 +54,49 @@ class AgentService:
 
         return summarized
 
+    def _collect_available_images(
+        self,
+        step_results: list[dict],
+        execution_context: dict | None,
+    ) -> dict[str, str]:
+        """
+        해석문의 [IMG:토큰]을 채우기 위해 라우팅이 보유한 이미지를 키별로 수집.
+
+        키:
+          - step_id / result_type role  → step 결과 이미지 (예: "s1", "bbox_overlay")
+          - "original", "original_N", 파일명  → 원본 스캔 이미지 (execution_context.attachments)
+        """
+        available: dict[str, str] = {}
+
+        for step in step_results or []:
+            sid = step.get("step") or step.get("step_id")
+            for image in step.get("images") or []:
+                if not isinstance(image, dict):
+                    continue
+                data = image.get("data")
+                if not data:
+                    continue
+                if sid is not None:
+                    available.setdefault(str(sid), data)
+                role = image.get("role")
+                if role:
+                    available.setdefault(str(role), data)
+
+        attachments = (execution_context or {}).get("attachments") or []
+        orig_idx = 0
+        for att in attachments:
+            filename = att.get("filename") if isinstance(att, dict) else None
+            for data in (att.get("images") or []) if isinstance(att, dict) else []:
+                if not data:
+                    continue
+                orig_idx += 1
+                available.setdefault("original", data)
+                available.setdefault(f"original_{orig_idx}", data)
+                if filename:
+                    available.setdefault(str(filename), data)
+
+        return available
+
     # ──────────────────────────────────────────────────
     # /agent/plan  — 모드별 쿼리 라우팅
     # ──────────────────────────────────────────────────
@@ -204,15 +247,30 @@ class AgentService:
                 logger.info("[Agent] interpret image_roles input: %s", image_roles_input)
                 logger.info("[Agent] interpret image_roles sorted: %s", ordered_roles)
                 logger.info("[Agent] interpret slice lines: %s", slice_lines)
+                # [IMG:토큰] 보완 — agent가 누락한 이미지를 라우팅 보유분(step 결과·원본)으로 채움
+                agent_images: dict = data.get("images") or {}
+                available = self._collect_available_images(step_results, execution_context)
+                filled = dict(agent_images)
+                missing_before = [t for t in ordered_img_roles if t not in filled]
+                for token in ordered_img_roles:
+                    if token not in filled and token in available:
+                        filled[token] = available[token]
+                still_missing = [t for t in ordered_img_roles if t not in filled]
+
                 logger.info(
-                    "[Agent] interpret response summary: img_token_count=%d | img_tokens=%s | inline_image_keys=%s",
+                    "[Agent] interpret response summary: img_token_count=%d | img_tokens=%s | "
+                    "agent_keys=%s | filled_keys=%s | available_keys=%s | missing_before=%s | still_missing=%s",
                     len(img_tokens),
                     img_tokens,
-                    list((data.get("images") or {}).keys()),
+                    list(agent_images.keys()),
+                    list(filled.keys()),
+                    list(available.keys()),
+                    missing_before,
+                    still_missing,
                 )
                 return {
                     "interpretation": interpretation,
-                    "images":         data.get("images", {}),
+                    "images":         filled,
                 }
         except Exception as e:
             logger.exception(
