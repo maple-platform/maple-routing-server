@@ -72,9 +72,12 @@ ChromaDB 모델 탐색   Res  → DAG 실행 (병렬+순차)      Res  → VLM �
 - **실행**: step마다 asyncio 태스크. 각 태스크는 자기 `depends_on` 태스크를 먼저 await → 실행.
   - depends_on 없는 노드들은 동시(병렬) 시작
   - 의존 노드는 선행 완료 즉시 시작 (barrier 낭비 없음, 최대 병렬)
-- **입력 구성** (`_resolve_step_input`):
-  - 루트: `required_data`에 맞는 원본 파일 선택 (Track B `select_input_file`)
+- **입력 구성** (`_resolve_step_input`) — Track B 포맷 정합:
+  - required 카테고리 직접 매칭 우선
+  - **image 요구인데 영상 원본(DICOM/NIfTI)만 있으면 PNG로 변환**해 전달 (`_convert_to_png`, windowing 재사용). 변환 결과는 `_converted/<step_id>/*.png`에 저장 후 컨테이너 경로 전달
+  - 변환/매칭 불가 시 해당 step skip + `errors[]` 기록
   - 의존: 원본 경로 + 선행 출력의 ROI (있으면 `{image_path, roi}`)
+  - 예: 흉부 X-ray(DICOM) 1장 업로드 → YOLO(dicom)는 원본, ChestXray14(image)는 변환 PNG로 **둘 다 실행**
 - **집계**: step_results[] (step_id·model·result_type·predictions·model_output·images).
   일부 실패 시 `status: "partial"` + `errors[]`, 전부 실패 시 error.
 

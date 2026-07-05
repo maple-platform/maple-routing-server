@@ -117,16 +117,69 @@ class PipelineService:
         if seen != len(by_id):
             raise ValueError("depends_on 사이클 감지 — 실행 계획이 DAG가 아님")
 
-    def _resolve_step_input(self, step: dict, saved_files: list[Path], dep_results: dict):
+    def _convert_to_png(self, src: Path, out_dir: Path) -> Path | None:
         """
-        step 입력 구성.
-        - 루트: required_data에 맞는 원본 파일 (Track B 선택)
-        - 의존: 원본 + 선행 출력의 ROI (있으면 함께 전달)
+        dicom/nifti 원본 → 대표 슬라이스 PNG 파일 (image 요구 모델용, Track B 포맷 정합).
+        attachments 핸들러의 렌더링(windowing 등)을 재사용한다.
         """
-        from services.file_categories import select_input_file
+        import base64 as _b64
+        from services.attachments.handlers import DicomHandler, NiftiHandler
+        from services.file_categories import file_category
 
-        base = select_input_file(saved_files, step.get("required_data") or [])
-        base_path = self._to_container_path(base) if base else None
+        cat = file_category(src)
+        handler = DicomHandler() if cat == "dicom" else NiftiHandler() if cat == "nifti" else None
+        if handler is None:
+            return None
+        try:
+            na = handler._parse_sync(src.name, src.read_bytes())
+            if not na.images:
+                return None
+            data_uri = na.images[0]  # 첫(axial) 슬라이스
+            b64 = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{src.stem}.png"
+            out_path.write_bytes(_b64.b64decode(b64))
+            return out_path
+        except Exception as e:
+            logger.warning("PNG 변환 실패 (%s): %s", src, e)
+            return None
+
+    def _resolve_step_input(self, step: dict, saved_files: list[Path], dep_results: dict, save_input_dir: Path):
+        """
+        step 입력 구성 (Track B: 선택 + 포맷 정합).
+        - required 카테고리 직접 매칭 우선
+        - image 요구인데 영상 원본만 있으면 DICOM/NIfTI → PNG 변환
+        - required 없으면 업로드 우선순위 폴백
+        - 의존: 선행 출력의 ROI 병합
+        변환/매칭 불가 시 None → run_dag가 skip + errors[] 기록
+        """
+        from services.file_categories import categorize, required_to_category, select_input_file
+
+        by_cat = categorize(saved_files)
+        required = {required_to_category(r) for r in (step.get("required_data") or [])}
+        sid = str(step.get("step_id") or step.get("step") or step.get("project"))
+
+        base: Path | None = None
+        if required:
+            for cat in ("csv", "json", "dicom", "nifti", "image"):
+                if cat in required and by_cat.get(cat):
+                    base = by_cat[cat][0]
+                    break
+            # image 요구인데 맞는 파일 없음 → 영상 원본을 PNG로 변환
+            if base is None and "image" in required:
+                for src_cat in ("dicom", "nifti"):
+                    if by_cat.get(src_cat):
+                        conv = self._convert_to_png(by_cat[src_cat][0], save_input_dir / "_converted" / sid)
+                        if conv:
+                            logger.info("[DAG %s] %s→PNG 변환 입력: %s", sid, src_cat, conv.name)
+                            base = conv
+                            break
+        else:
+            base = select_input_file(saved_files, [])
+
+        if base is None:
+            return None
+        base_path = self._to_container_path(base)
 
         roi = None
         for dep in dep_results.values():
@@ -136,7 +189,7 @@ class PipelineService:
             data = mo.get("data") if isinstance(mo.get("data"), dict) else {}
             roi = roi or (data.get("roi") if data else None) or mo.get("roi")
 
-        if roi and base_path:
+        if roi:
             return {"image_path": base_path, "roi": roi}
         return base_path
 
@@ -254,7 +307,7 @@ class PipelineService:
             step = by_id[sid]
             deps = [str(d) for d in (step.get("depends_on") or [])]
             dep_results = {d: await tasks[d] for d in deps}   # 선행 완료 대기 (실패 시 전파)
-            input_data = self._resolve_step_input(step, saved_files, dep_results)
+            input_data = self._resolve_step_input(step, saved_files, dep_results, save_input_dir)
             if input_data is None:
                 raise InferenceServerError(
                     f"[{sid}] 입력 파일 없음 (required_data={step.get('required_data')})"
