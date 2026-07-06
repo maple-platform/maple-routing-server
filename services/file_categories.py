@@ -37,9 +37,11 @@ def required_to_category(val: str) -> str:
         return "csv"
     if v in ("png", "jpg", "jpeg", "image"):
         return "image"
-    if v in ("nii", "nifti", "gz"):
+    if v in ("nii", "nii.gz", "nifti", "gz"):
         return "nifti"
-    return "dicom"  # dicom/모달·시퀀스 명칭(T2, STIR T2, MRI, x-ray 등) 및 기본값
+    if v in ("dcm", "dicom"):
+        return "dicom"
+    return "dicom"  # 모달·시퀀스 명칭(T2, STIR T2, MRI, x-ray 등) 및 기본값
 
 
 def categorize(files: list[Path]) -> dict[str, list[Path]]:
