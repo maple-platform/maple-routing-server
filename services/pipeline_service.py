@@ -5,6 +5,7 @@ Agent가 생성한 Execution Plan을 받아 Step별로 모델 컨테이너를 �
 이전 Step의 출력을 다음 Step의 입력으로 전달한다.
 """
 import os
+import asyncio
 import logging
 import base64
 
@@ -75,6 +76,265 @@ class PipelineService:
         elif len(output_images) > 1:
             restored["images_b64"] = output_images
         return restored
+
+    def _to_container_path(self, host_path: Path) -> str:
+        """호스트 ./data/... 경로 → 컨테이너 /data/... 경로."""
+        try:
+            rel = host_path.resolve().relative_to(Path("./data").resolve())
+            return "/data/" + str(rel).replace("\\", "/")
+        except ValueError:
+            return str(host_path.resolve()).replace("\\", "/")
+
+    # ──────────────────────────────────────────────────
+    # DAG 실행기 (general 에이전틱 파이프라인 Step 2)
+    # execution_plan.steps[] 를 depends_on 기반 병렬+순차로 실행
+    # ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_dag(by_id: dict) -> None:
+        """depends_on 참조 유효성 + 사이클 검사 (Kahn 위상정렬)."""
+        from collections import deque
+
+        indeg = {sid: 0 for sid in by_id}
+        adj: dict[str, list[str]] = {sid: [] for sid in by_id}
+        for sid, step in by_id.items():
+            for dep in (step.get("depends_on") or []):
+                dep = str(dep)
+                if dep not in by_id:
+                    raise ValueError(f"step '{sid}'의 depends_on '{dep}' 참조가 존재하지 않음")
+                indeg[sid] += 1
+                adj[dep].append(sid)
+
+        q = deque([sid for sid, deg in indeg.items() if deg == 0])
+        seen = 0
+        while q:
+            node = q.popleft()
+            seen += 1
+            for nxt in adj[node]:
+                indeg[nxt] -= 1
+                if indeg[nxt] == 0:
+                    q.append(nxt)
+        if seen != len(by_id):
+            raise ValueError("depends_on 사이클 감지 — 실행 계획이 DAG가 아님")
+
+    def _resolve_step_input(self, step: dict, saved_files: list[Path], dep_results: dict, save_input_dir: Path):
+        """
+        step 입력 구성 (Track B: 선택 + 포맷 정합, 변환 레지스트리 기반).
+        - required 카테고리 직접 매칭 우선
+        - 없으면 (원본→목표) 변환 레지스트리 조회해 변환 (예: dicom→png)
+        - required 없으면 업로드 우선순위 폴백
+        - 의존: 선행 출력의 ROI 병합
+        변환/매칭 불가 시 None → run_dag가 skip + errors[] 기록
+        """
+        from services.file_categories import CAT_PRIORITY, categorize, required_to_category, select_input_file
+        from services.format_convert import convert as convert_format, get_converter
+
+        by_cat = categorize(saved_files)
+        required = {required_to_category(r) for r in (step.get("required_data") or [])}
+        sid = str(step.get("step_id") or step.get("step") or step.get("project"))
+
+        base: Path | None = None
+        if required:
+            # 1) required 카테고리 직접 매칭
+            for cat in CAT_PRIORITY:
+                if cat in required and by_cat.get(cat):
+                    base = by_cat[cat][0]
+                    break
+            # 2) 변환 레지스트리: (원본 카테고리 → 목표) 변환기 조회
+            if base is None:
+                out_dir = save_input_dir / "_converted" / sid
+                for target in required:
+                    for src_cat in CAT_PRIORITY:
+                        src_files = by_cat.get(src_cat)
+                        if not src_files or not get_converter(src_cat, target):
+                            continue
+                        conv = convert_format(src_files[0], src_cat, target, out_dir)
+                        if conv:
+                            logger.info("[DAG %s] 포맷 변환 %s→%s: %s", sid, src_cat, target, conv.name)
+                            base = conv
+                            break
+                    if base:
+                        break
+        else:
+            base = select_input_file(saved_files, [])
+
+        if base is None:
+            return None
+        base_path = self._to_container_path(base)
+
+        roi = None
+        for dep in dep_results.values():
+            if not isinstance(dep, dict):
+                continue
+            mo = dep.get("model_output") or {}
+            data = mo.get("data") if isinstance(mo.get("data"), dict) else {}
+            roi = roi or (data.get("roi") if data else None) or mo.get("roi")
+
+        if roi:
+            return {"image_path": base_path, "roi": roi}
+        return base_path
+
+    async def _exec_step(self, step: dict, input_data, save_output_dir: Path) -> dict:
+        """단일 step 실행 → step_entry 반환. 실패 시 예외."""
+        sid     = str(step.get("step_id") or step.get("step") or step.get("project"))
+        dept    = step.get("department")
+        project = step.get("project")
+        logger.info("[DAG %s] 실행 - %s/%s", sid, dept, project)
+
+        model_info = await self.projects_repo.get_model_by_project(dept, project)
+        if not model_info:
+            raise InferenceServerError(f"[{sid}] {project} 모델 정보 없음")
+        container_url = model_info.get("docker", {}).get("service_url")
+        if not container_url:
+            raise InferenceServerError(f"[{sid}] {project} 컨테이너 URL 없음")
+        model_path = await self._get_model_path(dept, project)
+
+        params = {
+            "container_url": container_url,
+            "container_endpoint": "/run/v2",
+            "model_name": project,
+        }
+        if model_path:
+            params["model_path"] = model_path
+
+        infer_result = await self.inference_client.infer(
+            model_info=model_info,
+            model_id=model_info.get("model_id") or f"{dept}/{project}",
+            input_data=input_data,
+            params=params,
+        )
+        result = self._to_container_result(infer_result)
+        if result.get("status") != "ok":
+            raise InferenceServerError(f"[{sid}] 추론 오류: {result.get('detail')}")
+
+        # 이미지 결과 저장 + images 필드
+        output_image_role = model_info.get("output_image_role")
+        images_field: list[dict] = []
+        raw_b64: list[str] = []
+        b64_list = result.get("images_b64") or ([result["image_b64"]] if result.get("image_b64") else [])
+        for b64 in b64_list:
+            img_path = save_output_dir / f"{sid}_{project}_result_{len(raw_b64) + 1}.png"
+            img_path.write_bytes(base64.b64decode(b64))
+            raw_b64.append(b64)
+            entry: dict = {"data": f"data:image/png;base64,{b64}"}
+            if output_image_role:
+                entry["role"] = (
+                    f"{output_image_role}_{len(raw_b64)}" if len(b64_list) > 1 else output_image_role
+                )
+            images_field.append(entry)
+
+        # result_type coalesce: 컨테이너가 안 주면 DB 메타 → plan step → 이미지/예측 유무로 유도.
+        # (agent interpret 스키마가 result_type을 필수 문자열로 받으므로 null 금지)
+        result_type = (
+            result.get("result_type")
+            or model_info.get("result_type")
+            or step.get("result_type")
+            or ("image" if images_field else "text")
+        )
+
+        step_entry: dict = {
+            "step_id":      sid,
+            "step":         step.get("step"),
+            "model":        project,
+            "department":   dept,
+            "task_type":    step.get("task_type"),
+            "result_type":  result_type,
+            "predictions":  result.get("predictions"),
+            "model_output": {
+                k: v for k, v in result.items()
+                if k not in ("status", "result_type", "predictions", "image_b64", "images_b64")
+            },
+            "image_b64":    raw_b64[0] if len(raw_b64) == 1 else None,
+            "images_b64":   raw_b64 if len(raw_b64) > 1 else [],
+        }
+        if images_field:
+            step_entry["images"] = images_field
+        logger.info("[DAG %s] 완료 - result_type=%s", sid, result_type)
+        return step_entry
+
+    async def run_dag(
+        self,
+        steps: list[dict],       # agent execution_plan.steps[]
+        save_input_dir: Path,    # 저장된 원본 디렉터리
+        save_output_dir: Path,
+    ) -> dict:
+        """
+        execution_plan.steps[] 를 depends_on 기반 DAG로 실행 (병렬+순차).
+
+        각 step: {step_id, model_name, department, project, task_type,
+                  result_type, required_data, depends_on}
+        - depends_on:[] → 루트, 원본 입력
+        - depends_on:[step_id...] → 선행 완료 후 실행, 원본+선행 출력
+        """
+        save_output_dir.mkdir(parents=True, exist_ok=True)
+        saved_files = [p for p in save_input_dir.rglob("*") if p.is_file()]
+
+        by_id: dict[str, dict] = {}
+        for s in steps:
+            sid = str(s.get("step_id") or s.get("step") or s.get("project"))
+            by_id[sid] = s
+        if not by_id:
+            return {"status": "error", "message": "실행할 step이 없습니다."}
+
+        try:
+            self._validate_dag(by_id)
+        except ValueError as e:
+            logger.error("DAG 검증 실패: %s", e)
+            return {"status": "error", "message": str(e)}
+
+        tasks: dict[str, asyncio.Task] = {}
+
+        async def run_step(sid: str) -> dict:
+            step = by_id[sid]
+            deps = [str(d) for d in (step.get("depends_on") or [])]
+            dep_results = {d: await tasks[d] for d in deps}   # 선행 완료 대기 (실패 시 전파)
+            input_data = self._resolve_step_input(step, saved_files, dep_results, save_input_dir)
+            if input_data is None:
+                raise InferenceServerError(
+                    f"[{sid}] 입력 파일 없음 (required_data={step.get('required_data')})"
+                )
+            return await self._exec_step(step, input_data, save_output_dir)
+
+        for sid in by_id:
+            tasks[sid] = asyncio.create_task(run_step(sid))
+
+        gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+        step_results: list[dict] = []
+        errors: list[dict] = []
+        for sid, res in zip(tasks.keys(), gathered):
+            if isinstance(res, Exception):
+                logger.error("[DAG %s] 실패: %s", sid, res)
+                errors.append({"step_id": sid, "error": str(res)})
+            else:
+                step_results.append(res)
+
+        if not step_results:
+            return {"status": "error", "message": "모든 step 실행 실패", "errors": errors}
+
+        step_results.sort(key=lambda r: str(r.get("step_id")))
+
+        try:
+            await self.results_repo.save_result({
+                "pipeline":     True,
+                "dag":          True,
+                "timestamp":    datetime.now(timezone.utc),
+                "result_type":  "pipeline",
+                "step_results": [
+                    {"step_id": r.get("step_id"), "model": r.get("model"),
+                     "result_type": r.get("result_type")}
+                    for r in step_results
+                ],
+            })
+        except Exception as e:
+            logger.warning("DAG 결과 저장 실패: %s", e)
+
+        return {
+            "status":       "success" if not errors else "partial",
+            "result_type":  "pipeline",
+            "step_results": step_results,
+            "errors":       errors,
+        }
 
     async def run_pipeline(
         self,
@@ -177,11 +437,18 @@ class PipelineService:
                         img_entry["role"] = output_image_role
                 images_field.append(img_entry)
 
+            # result_type coalesce (interpret 스키마 필수 문자열 → null 금지)
+            result_type = (
+                result.get("result_type")
+                or model_info.get("result_type")
+                or ("image" if images_field else "text")
+            )
+
             # Step 결과 기록
             step_entry: dict = {
                 "step":        step_num,
                 "model":       project,
-                "result_type": result.get("result_type"),
+                "result_type": result_type,
                 "predictions": result.get("predictions"),
                 "model_output": {
                     k: v for k, v in result.items()
