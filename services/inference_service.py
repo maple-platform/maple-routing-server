@@ -262,7 +262,9 @@ class InferenceService:
         output_image_role = model_info.get("output_image_role")
 
         # ── IMAGE ──
-        if result_type == "image":
+        _IMAGE_TYPES = {"image", "gradcam_overlay", "bbox_overlay", "segmentation_overlay", "3d_overlay"}
+        _result_types = result_type if isinstance(result_type, list) else [result_type]
+        if _IMAGE_TYPES & set(_result_types):
             # 단수(image_b64) 또는 복수(images_b64) 모두 처리
             images_b64_list = container_result.get("images_b64") or []
             if not images_b64_list:
