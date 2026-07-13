@@ -95,6 +95,8 @@ async def register_to_chromadb(model_name, department, project, meta: dict, doc_
         "task_type":    meta.get("task_type", ""),
         "disease":      meta.get("disease", ""),
         "required_data": meta.get("required_data", []),
+        "provides":     meta.get("provides", []),   # DAG 체인 구성용 (agent가 depends_on 도출)
+        "requires":     meta.get("requires", []),
         "result_type":  meta.get("result_type", ""),
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -149,8 +151,11 @@ def build_model_info(dept: str, project: str, meta: dict) -> dict:
         "model_description": meta.get("description", ""),
         "model_path":        model_path,
         "required_data":     meta.get("required_data", []),
+        "provides":          meta.get("provides", []),   # DAG: 이 모델이 산출하는 태그 (예: ["roi"])
+        "requires":          meta.get("requires", []),   # DAG: 이 모델이 선행으로 요구하는 태그
         "task_type":         meta.get("task_type", ""),
         "result_type":       meta.get("result_type", "text"),
+        "output_image_role": meta.get("output_image_role"),  # interpret [IMG:role] 태깅용
         "inference_script":  inference_script,
         "inference_server":  meta.get("inference_server", "local"),
         "endpoint":          meta.get("endpoint", "/infer"),
@@ -180,6 +185,8 @@ async def main(dry_run: bool):
             print(f"  {m['dept']} / {m['project']}")
             print(f"    model_name    : {m['meta'].get('model_name', m['project'])}")
             print(f"    required_data : {m['meta'].get('required_data')}")
+            print(f"    provides      : {m['meta'].get('provides', [])}")
+            print(f"    requires      : {m['meta'].get('requires', [])}")
             print(f"    result_type   : {m['meta'].get('result_type')}")
             print(f"    service_url   : {m['meta'].get('docker', {}).get('service_url')}")
         return

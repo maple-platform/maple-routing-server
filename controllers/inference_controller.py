@@ -73,6 +73,7 @@ def _summarize_agent_plan_body(body: dict) -> dict:
         "uploaded_types": body.get("uploaded_types"),
         "images_count": len(body.get("images") or []),
         "csv_rows": len(body.get("csv_data") or []),
+        "attachments_count": len(body.get("attachments") or []),
     }
 
 
@@ -155,22 +156,105 @@ async def inference_endpoint(
             "sources": agent_resp.get("sources", []),
         })
 
-    # ── general 모드: 파일 변환 후 Agent VLM 종합 분석 ─────────────────────
+    # ── general 모드: 에이전틱 파이프라인 (plan→DAG 실행→집계→interpret) ─────
     if mode == "general":
         uploaded_files = [f for files in file_dict.values() for f in files]
-        images, csv_data = await inference_service.convert_files_for_general(uploaded_files)
 
+        # 1) 원본 저장 (모델 실행에 경로 필요) + attachments 정규화
+        timestamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_input_dir  = Path(SAVE_BASE_INPUT_DIR)  / "general" / timestamp
+        save_output_dir = Path(SAVE_BASE_OUTPUT_DIR) / "general" / timestamp
+        save_input_dir.mkdir(parents=True, exist_ok=True)
+        await _save_uploaded_files(file_dict, save_input_dir)
+
+        attachments    = await inference_service.build_attachments_from_dir(save_input_dir)
+        uploaded_types = _detect_uploaded_types(uploaded_files)
+
+        # 2) Agent plan — 모델 발견 + 실행계획(execution_plan.steps[]) 또는 VLM fallback
         agent_resp = await agent_service.plan(
             mode="general",
             query=query,
-            images=images,
-            csv_data=csv_data,
+            attachments=attachments,
+            uploaded_types=uploaded_types,
         )
+        plan  = agent_resp.get("execution_plan") or {}
+        steps = plan.get("steps") or []
+
+        # 3) fallback: 모델 없음 → VLM 답변 그대로 통과 (실행/interpret 없음)
+        if agent_resp.get("fallback_vlm_only") or not steps:
+            logger.info("[Agent] general fallback (VLM 단독) — 실행계획 없음")
+            return JSONResponse({
+                "status":  agent_resp.get("status", "success"),
+                "mode":    "general",
+                "message": agent_resp.get("message") or agent_resp.get("answer", ""),
+                "sources": agent_resp.get("sources", []),
+            })
+
+        # 4) DAG 실행 (병렬+순차)
+        logger.info("[Agent] general 실행계획 수신 — steps=%d", len(steps))
+        dag_result = await pipeline_service.run_dag(
+            steps=steps,
+            save_input_dir=save_input_dir,
+            save_output_dir=save_output_dir,
+        )
+        if dag_result.get("status") == "error":
+            return JSONResponse(dag_result)
+
+        step_results = dag_result.get("step_results", [])
+
+        # 5) 집계 — 프론트 이미지 + predictions
+        front_images: list[str] = []
+        for s in step_results:
+            for img in s.get("images") or []:
+                if img.get("data"):
+                    front_images.append(img["data"])
+        predictions = next(
+            (s.get("predictions") for s in reversed(step_results) if s.get("predictions")),
+            None,
+        )
+
+        # 6) interpret — 집계 결과 + 원본 스캔 메타 (원본 이미지 채널은 #7 후속)
+        interpret_steps = [
+            {
+                "step":         s.get("step_id"),
+                "model":        s.get("model"),
+                "result_type":  s.get("result_type"),
+                "predictions":  _normalize_predictions(s.get("predictions")),
+                "model_output": s.get("model_output"),
+                "images":       s.get("images"),
+            }
+            for s in step_results
+        ]
+        interpret_result = await agent_service.interpret(
+            query=query,
+            step_results=interpret_steps,
+            execution_context={
+                "mode": "general",
+                "plan": plan,
+                "attachments": attachments,   # 원본 스캔 이미지 + 메타 (§1에서 이미 빌드)
+            },
+        )
+
+        front_step_results = [
+            {
+                "step_id":     s.get("step_id"),
+                "model":       s.get("model"),
+                "result_type": s.get("result_type"),
+                "predictions": s.get("predictions"),
+            }
+            for s in step_results
+        ]
+
         return JSONResponse({
-            "status":  agent_resp.get("status", "success"),
-            "mode":    "general",
-            "message": agent_resp.get("message") or agent_resp.get("answer", ""),
-            "sources": agent_resp.get("sources", []),
+            "status":                "success" if dag_result.get("status") != "partial" else "partial",
+            "mode":                  "general",
+            "result_type":           "pipeline",
+            "images":                front_images,
+            "predictions":           predictions,
+            "step_results":          front_step_results,
+            "errors":                dag_result.get("errors", []),
+            "interpretation":        interpret_result.get("interpretation", ""),
+            "interpretation_images": interpret_result.get("images", {}),
         })
 
     # ── auto 모드: Agent가 파일 타입을 보고 prediction / clinical 판단 ───────
@@ -213,6 +297,9 @@ async def inference_endpoint(
 
     # 파일 저장
     await _save_uploaded_files(file_dict, save_input_dir)
+
+    # 원본 스캔 attachments (interpret에 원본 이미지 + 메타 전달 → VLM 종합판독)
+    attachments = await inference_service.build_attachments_from_dir(save_input_dir)
 
     # Agent plan — prediction 실행 계획 수립
     uploaded_files = [f for files in file_dict.values() for f in files]
@@ -293,6 +380,7 @@ async def inference_endpoint(
             execution_context={
                 "mode": "prediction",
                 "plan": agent_plan.get("plan") or agent_plan,
+                "attachments": attachments,
             },
         )
         logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))
@@ -351,6 +439,7 @@ async def inference_endpoint(
         execution_context={
             "mode": "prediction",
             "plan": agent_plan.get("plan") or agent_plan,
+            "attachments": attachments,
         },
     )
     logger.info("[Inference] final interpretation:\n%s", interpret_result.get("interpretation", ""))
