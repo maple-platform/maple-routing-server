@@ -248,6 +248,15 @@ class DicomHandler(AttachmentHandler):
         ds = pydicom.dcmread(BytesIO(content), stop_before_pixels=True, force=True)
         return _dicom_metadata(ds)
 
+    async def extract_metadata_path(self, filename: str, path: str) -> dict:
+        return await asyncio.to_thread(self._meta_path_sync, path)
+
+    def _meta_path_sync(self, path: str) -> dict:
+        import pydicom
+
+        ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        return _dicom_metadata(ds)
+
 
 # ── NIfTI ────────────────────────────────────────────────────────────────────
 

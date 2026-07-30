@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -65,3 +66,12 @@ class AttachmentHandler(ABC):
         """
         result = await self.parse(filename, content)
         return result.metadata
+
+    async def extract_metadata_path(self, filename: str, path: str) -> dict:
+        """
+        파일 경로에서 메타데이터만 추출.
+
+        대용량 업로드는 본문 전체를 메모리에 복사하지 않도록 이 진입점을
+        사용한다. 기본 구현은 하위 호환을 위해 기존 bytes API를 재사용한다.
+        """
+        return await self.extract_metadata(filename, Path(path).read_bytes())

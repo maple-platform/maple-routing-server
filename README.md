@@ -59,7 +59,7 @@ A100 서버에서 각 구성요소가 실행되는 방식은 다음과 같다. *
 | 추론 게이트웨이 + 런타임 | **도커 compose** (`maple-inference` 8110, `runtime-*` 9020~9023) | **`maple-model-execution-server` 레포에서 관리·빌드** (이 레포 아님) |
 
 > - **왜 라우팅은 conda(호스트), MongoDB는 도커인가?** — 라우팅은 코드를 자주 고치며 `--reload`로 돌려야 해서 호스트에서 conda로 직접 실행하는 편이 편하다. 반면 MongoDB는 한 번 띄우면 건드릴 일이 거의 없는 인프라라, 컨테이너로 격리해 버전 고정·데이터 볼륨 분리·재부팅 자동기동을 맡기는 게 관리하기 좋다. (개발/단일 서버 배포에서 흔한 조합)
-> - MongoDB 는 `docker run -d --name maple-mongo -p 127.0.0.1:27017:27017 -v maple-mongo-data:/data/db mongo:7` 형태로 기동되어 있으며(`127.0.0.1` 바인딩 → 외부 비노출, `restart=unless-stopped`), 컨테이너를 지워도 볼륨 `maple-mongo-data` 만 있으면 데이터는 보존된다.
+> - MongoDB는 `docker-compose.mongo.yml`로 single-node replica set(`rs0`)을 구성한다. `127.0.0.1`에만 바인딩하고 named volume `maple-mongo-data`를 사용하므로 컨테이너를 재구성해도 볼륨을 제거하지 않으면 데이터는 보존된다.
 > - 도커 명령을 `sudo` 없이 쓰려면 실행 사용자가 `docker` 그룹에 속해야 한다 (`sudo usermod -aG docker $USER` 후 재로그인).
 > - 모델실행 스택의 Dockerfile/compose 및 빌드 방법은 `maple-model-execution-server` 레포 README 를 참고. 이 레포는 그 컨테이너들을 **호출만** 한다.
 
@@ -342,6 +342,15 @@ maple-routing-server/
 |---|---|
 | `departments` | 진료과 → 프로젝트 → 모델 전체 계층 구조 (단일 문서) |
 | `inference_results` | 추론 실행 이력 및 결과 저장 |
+| `doctors` | 의사 계정, 병원·진료과·역할 |
+| `auth_sessions` | refresh token rotation 및 로그아웃 세션 |
+| `patients` / `appointments` / `visits` | 환자·예약·방문 |
+| `analyses` / `doctor_analysis_locks` | 분석 결과와 의사별 실행 큐 |
+| `notes` / `chat_messages` | 환자 메모와 방문별 대화 |
+| `medical_files` / `fs.*` | 의료 파일 메타데이터와 GridFS |
+| `access_logs` | 환자 데이터 접근 감사 기록 |
+
+환자 접수는 여러 컬렉션을 트랜잭션으로 함께 생성하므로 MongoDB는 standalone이 아니라 single-node replica set 이상이어야 한다.
 
 #### departments 구조
 
@@ -525,9 +534,25 @@ Agent는 이 role을 임상 해석 텍스트에 `[IMG:role]` 토큰으로 삽입
 
 | 변수 | 값 (A100 서버 기준) | 설명 |
 |---|---|---|
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB 연결 URI (`MONGO_URL` 도 하위 호환 인식) |
+| `MONGO_URI` | `mongodb://localhost:27017/?replicaSet=rs0` | MongoDB replica set 연결 URI (`MONGO_URL`도 하위 호환 인식) |
 | `DB_NAME` | `maple_db` | 데이터베이스명 |
+| `REQUIRE_REPLICA_SET` | `true` | standalone MongoDB 기동 차단 |
 | `MAIN_DOCUMENT_ID` | *(필수, `.env` 설정)* | MongoDB `departments` 컬렉션 문서 ObjectId |
+| `JWT_SECRET` | *(필수)* | access/refresh JWT 서명 키 |
+| `ACCESS_TOKEN_MINUTES` | `30` | access token 수명 |
+| `REFRESH_TOKEN_DAYS` | `7` | refresh session 최대 수명 |
+| `HOSPITAL_ID` / `HOSPITAL_NAME` | `champion` / `챔피언 병원` | 단일 병원 설정 |
+| `CLIENT_ORIGINS` | `http://localhost:3000,app://maple` | React 개발 및 Electron 프로덕션 CORS origin |
+| `MAX_UPLOAD_BYTES` | `536870912` | 첨부 파일 한 건의 최대 크기(기본 512 MiB) |
+| `CLINICAL_WORK_DIR` | `./data/clinical-work` | 런타임 `/data`와 공유하는 분석 임시 작업 경로 |
+| `FILE_SIGNING_SECRET` | *(필수)* | 5분 파일 접근 URL HMAC 서명 키 |
+| `FILE_SIGNED_URL_SECONDS` | `300` | 파일 접근 URL 유효시간 |
+| `AUDIT_RETENTION_DAYS` | `365` | 파일 URL 발급 감사 기록 보존기간 |
+| `ANALYSIS_WORKER_ENABLED` | `true` | 프로세스 내 임상 분석 worker 실행 |
+| `ANALYSIS_GLOBAL_CONCURRENCY` | `3` | 서로 다른 의사 큐의 최대 병렬 실행 수 |
+| `ANALYSIS_LEASE_SECONDS` | `300` | 분석 및 의사 잠금 lease |
+| `ANALYSIS_MAX_ATTEMPTS` | `2` | 장애·실패 시 최대 실행 횟수 |
+| `ANALYSIS_POLL_INTERVAL_SECONDS` | `2` | worker가 새 작업을 조회하는 간격 |
 | `AGENT_URL` | `http://<H100-사설IP>:8101` | AI Agent 서비스 URL — **H100 서버 사설 IP 직결** (터널 불필요) |
 | `AGENT_TIMEOUT` | `300` | Agent 요청 타임아웃 (초) |
 | `MAPLE_INFERENCE_URL` | `http://localhost:8110` | 추론 게이트웨이 URL (같은 A100 서버 로컬 도커) |
@@ -557,9 +582,14 @@ conda create -n maple python=3.10 -y
 conda activate maple
 pip install -r requirements.txt
 
-# 1. MongoDB 컨테이너 상태 확인 (없으면 기동)
-docker ps | grep maple-mongo
-# 없으면: docker run -d --name maple-mongo -p 127.0.0.1:27017:27017 -v maple-mongo-data:/data/db mongo:7
+# 1. MongoDB single-node replica set 기동
+# 기존 standalone maple-mongo가 있으면 컨테이너만 제거한다. named volume은 유지한다.
+docker stop maple-mongo
+docker rm maple-mongo
+docker compose -f docker-compose.mongo.yml up -d
+
+# replica set 확인
+docker exec maple-mongo mongosh --quiet --eval 'rs.status().set'
 
 # 2. Agent(H100 서버) 사설망 직결 확인  (<H100-사설IP> = H100 서버의 ens224 IP)
 curl http://<H100-사설IP>:8101/health
@@ -569,12 +599,31 @@ curl http://<H100-사설IP>:8101/health
 python scan_and_register.py --dry-run   # 등록될 모델 미리보기
 python scan_and_register.py             # AI_Models/ 스캔 → MongoDB + Agent ChromaDB 등록
 
-# 4. 백엔드 서버 실행
+# 4. 초기 의사 3명 등록 (최초 1회 또는 비밀번호 재설정 시)
+export SEED_DOCTOR_PASSWORD='<doctor-initial-password>'
+export SEED_ADMIN_PASSWORD='<doctor-admin-initial-password>'
+python -m scripts.seed_doctors
+unset SEED_DOCTOR_PASSWORD SEED_ADMIN_PASSWORD
+
+# 5. 데모 환자 40명과 당일 예약/방문/분석 예시 등록
+python -m scripts.seed_clinical_demo
+# 특정 시연 날짜: DEMO_DATE=YYYY-MM-DD python -m scripts.seed_clinical_demo
+
+# 2026-07-30 클라이언트 시연 전용(20명: 완료 8 / 분석 중 4 / 파일 대기 8)
+python -m scripts.seed_showcase_20260730
+
+# 6. 백엔드 서버 실행
 conda activate maple
 uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
 API 문서 (A100 서버 로컬): http://localhost:8100/docs
+
+임상 분석은 예약 시각과 등록 시각 순으로 처리됩니다. 같은 의사의 분석은 한
+건씩 실행되고, 서로 다른 의사는 `ANALYSIS_GLOBAL_CONCURRENCY` 범위에서
+병렬 실행됩니다. 클라이언트는 `GET /analyses/{analysis_id}`를 polling하고,
+결과 이미지 URL이 만료되면
+`POST /analyses/{analysis_id}/access-urls`로 한 번에 갱신합니다.
 
 ### 클라이언트 연결 (로컬 PC)
 

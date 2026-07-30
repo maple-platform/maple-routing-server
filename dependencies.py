@@ -1,11 +1,80 @@
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+
 from config.database import get_database, MAIN_DOCUMENT_ID
+from repositories.doctors_repository import DoctorsRepository
 from repositories.projects_repository import ProjectsRepository
 from repositories.results_repository import ResultsRepository
+from repositories.sessions_repository import SessionsRepository
 from services.projects_service import ProjectsService
 from services.inference_service import InferenceService
 from services.agent_service import AgentService
 from services.admin_service import AdminService
+from services.auth_service import AuthService, AuthServiceError
+from services.clinical_service import ClinicalService
+from services.analysis_query_service import AnalysisQueryService
+from services.file_access_service import FileAccessService
+from services.clinical_chat_service import ClinicalChatService
+from services.clinical_note_service import ClinicalNoteService
 from services.pipeline_service import PipelineService
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def get_auth_service():
+    db = get_database()
+    return AuthService(
+        DoctorsRepository(db),
+        SessionsRepository(db),
+    )
+
+
+def get_clinical_service():
+    return ClinicalService(get_database())
+
+
+def get_analysis_query_service():
+    return AnalysisQueryService(get_database())
+
+
+def get_file_access_service():
+    return FileAccessService(get_database())
+
+
+def get_clinical_chat_service():
+    return ClinicalChatService(get_database())
+
+
+def get_clinical_note_service():
+    return ClinicalNoteService(get_database())
+
+
+async def get_current_doctor(
+    token: str = Depends(oauth2_scheme),
+    service: AuthService = Depends(get_auth_service),
+):
+    try:
+        return await service.authenticate_access_token(token)
+    except AuthServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
+async def require_doctor(doctor=Depends(get_current_doctor)):
+    roles = set(doctor.get("roles") or [])
+    if not roles.intersection({"doctor", "admin"}):
+        raise HTTPException(status_code=403, detail="doctor role required")
+    return doctor
+
+
+async def require_admin(doctor=Depends(get_current_doctor)):
+    if "admin" not in set(doctor.get("roles") or []):
+        raise HTTPException(status_code=403, detail="admin role required")
+    return doctor
+
 
 # 프로젝트 레포지토리
 def get_projects_repository():

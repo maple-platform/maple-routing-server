@@ -22,6 +22,60 @@ from config.settings import AGENT_URL, AGENT_TIMEOUT
 logger = logging.getLogger("maple.agent")
 
 
+def canonical_image_role(value: str) -> str | None:
+    normalized = value.strip().lower()
+    if normalized in {"base", "heat", "box"}:
+        return normalized
+    if normalized.startswith("original") or "segmentation" in normalized:
+        return "base"
+    if "gradcam" in normalized or "heat" in normalized:
+        return "heat"
+    if "bbox" in normalized or "bounding" in normalized or "detect" in normalized:
+        return "box"
+    return None
+
+
+def canonicalize_interpretation_images(
+    interpretation: str,
+    images: dict,
+) -> tuple[str, dict]:
+    canonical_images: dict = {}
+    canonical_key_by_original: dict[str, str] = {}
+    role_counts: dict[str, int] = {}
+    for key, value in images.items():
+        original = str(key)
+        role = canonical_image_role(original)
+        duplicate_key = next(
+            (
+                existing_key
+                for existing_key, existing_value in canonical_images.items()
+                if existing_value == value
+            ),
+            None,
+        )
+        if role and duplicate_key is not None:
+            canonical_key_by_original[original] = duplicate_key
+            continue
+        if role:
+            index = role_counts.get(role, 0)
+            canonical = role if index == 0 else f"{role}:{index}"
+            role_counts[role] = index + 1
+        else:
+            canonical = original
+        canonical_key_by_original[original] = canonical
+        canonical_images[canonical] = value
+
+    def replace(match: re.Match) -> str:
+        original = match.group(1)
+        canonical = (
+            canonical_key_by_original.get(original)
+            or canonical_image_role(original)
+        )
+        return f"[IMG:{canonical or original}]"
+
+    return re.sub(r"\[IMG:([^\]]+)\]", replace, interpretation), canonical_images
+
+
 class AgentService:
     def __init__(self, agent_url: str = AGENT_URL):
         self.agent_url = agent_url.rstrip("/")
@@ -111,6 +165,7 @@ class AgentService:
         images: list[str] | None = None,
         csv_data: list[dict] | None = None,
         attachments: list[dict] | None = None,
+        history: list[dict] | None = None,
     ) -> dict:
         """
         Agent에 실행 계획 요청.
@@ -142,6 +197,8 @@ class AgentService:
             payload["csv_data"] = csv_data
         if attachments is not None:
             payload["attachments"] = attachments
+        if history is not None:
+            payload["history"] = history
 
         logger.info(f"[Agent] POST /agent/plan — mode={mode}")
         try:
@@ -218,9 +275,19 @@ class AgentService:
                 )
                 if resp.status_code != 200:
                     logger.error(f"[Agent] interpret {resp.status_code}: {resp.text}")
-                    return {"interpretation": "", "images": {}}
+                    return {
+                        "finding": "",
+                        "interpretation": "",
+                        "recommendation": "",
+                        "images": {},
+                    }
                 data = resp.json()
-                interpretation = data.get("interpretation", "")
+                structured = data.get("result") or {}
+                interpretation = (
+                    structured.get("interpretation")
+                    or data.get("interpretation")
+                    or ""
+                )
                 img_tokens = re.findall(r"\[IMG:[^\]]+\]", interpretation)
                 ordered_img_roles = re.findall(r"\[IMG:([^\]]+)\]", interpretation)
                 image_roles_input: list[str] = []
@@ -255,6 +322,14 @@ class AgentService:
                 for token in ordered_img_roles:
                     if token not in filled and token in available:
                         filled[token] = available[token]
+                interpretation, filled = canonicalize_interpretation_images(
+                    interpretation,
+                    filled,
+                )
+                ordered_img_roles = re.findall(
+                    r"\[IMG:([^\]]+)\]",
+                    interpretation,
+                )
                 still_missing = [t for t in ordered_img_roles if t not in filled]
 
                 logger.info(
@@ -269,7 +344,12 @@ class AgentService:
                     still_missing,
                 )
                 return {
+                    "status":         data.get("status"),
+                    "finding":        structured.get("finding") or "",
                     "interpretation": interpretation,
+                    "recommendation": structured.get("recommendation") or "",
+                    "agent_risk_tier": structured.get("risk_tier"),
+                    "agent_confidence": structured.get("confidence"),
                     "images":         filled,
                 }
         except Exception as e:
@@ -281,7 +361,12 @@ class AgentService:
                 task,
                 len(step_results),
             )
-            return {"interpretation": "", "images": {}}
+            return {
+                "finding": "",
+                "interpretation": "",
+                "recommendation": "",
+                "images": {},
+            }
 
     # ──────────────────────────────────────────────────
     # /agent/models/register  — 모델 등록

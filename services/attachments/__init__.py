@@ -6,6 +6,7 @@
 
   normalize_attachment  — 파일 1건 → NormalizedAttachment (렌더+메타)
   extract_metadata      — 파일 1건 → 메타데이터만 (렌더 없이, interpret용)
+  extract_metadata_path — 대용량 파일 경로 → 메타데이터만
   apply_image_budget    — 요청 단위 이미지 토큰 예산 적용 (초과시 강등/캡)
 """
 from __future__ import annotations
@@ -24,6 +25,7 @@ __all__ = [
     "find_handler",
     "normalize_attachment",
     "extract_metadata",
+    "extract_metadata_path",
     "apply_image_budget",
 ]
 
@@ -50,6 +52,20 @@ async def extract_metadata(filename: str, content: bytes, content_type: str = ""
         return {}
     try:
         return await handler.extract_metadata(filename, content)
+    except Exception as e:
+        logger.warning("메타 추출 실패 (%s): %s", filename, e)
+        return {}
+
+
+async def extract_metadata_path(
+    filename: str, path: str, content_type: str = ""
+) -> dict:
+    """대용량 파일을 메모리에 복사하지 않고 경로에서 메타데이터만 추출."""
+    handler = find_handler(filename, content_type)
+    if handler is None:
+        return {}
+    try:
+        return await handler.extract_metadata_path(filename, path)
     except Exception as e:
         logger.warning("메타 추출 실패 (%s): %s", filename, e)
         return {}

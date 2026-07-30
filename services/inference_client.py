@@ -70,3 +70,43 @@ class InferenceServerClient:
             raise InferenceServerError(f"추론 서버 응답 실패 ({exc.response.status_code}): {detail}") from exc
         except httpx.HTTPError as exc:
             raise InferenceServerError(f"추론 서버 호출 실패: {exc}") from exc
+
+    async def infer_v2(
+        self,
+        *,
+        model_info: dict[str, Any],
+        model_name: str,
+        input_path: str,
+        output_dir: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        모델 실행 서버의 Runtime 기반 v2 계약.
+
+        컨테이너 URL과 모델 경로는 호출자가 전달하지 않는다. 모델 실행 서버가
+        model_name의 config.yaml을 읽어 runtime과 실행 경로를 결정한다.
+        """
+        base_url = self.resolve_base_url(model_info)
+        payload = {
+            "model_name": model_name,
+            "input_path": input_path,
+            "output_dir": output_dir,
+            "params": params or {},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(f"{base_url}/infer/v2", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.TimeoutException as exc:
+            raise InferenceServerTimeout(
+                f"추론 서버 v2 요청 시간이 초과되었습니다: {exc}"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text
+            raise InferenceServerError(
+                f"추론 서버 v2 응답 실패 ({exc.response.status_code}): {detail}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise InferenceServerError(f"추론 서버 v2 호출 실패: {exc}") from exc

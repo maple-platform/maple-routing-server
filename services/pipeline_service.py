@@ -82,8 +82,10 @@ class PipelineService:
         try:
             rel = host_path.resolve().relative_to(Path("./data").resolve())
             return "/data/" + str(rel).replace("\\", "/")
-        except ValueError:
-            return str(host_path.resolve()).replace("\\", "/")
+        except ValueError as exc:
+            raise ValueError(
+                f"추론 입력은 공유 볼륨 ./data 아래에 있어야 합니다: {host_path}"
+            ) from exc
 
     # ──────────────────────────────────────────────────
     # DAG 실행기 (general 에이전틱 파이프라인 Step 2)
@@ -184,23 +186,31 @@ class PipelineService:
         model_info = await self.projects_repo.get_model_by_project(dept, project)
         if not model_info:
             raise InferenceServerError(f"[{sid}] {project} 모델 정보 없음")
-        container_url = model_info.get("docker", {}).get("service_url")
-        if not container_url:
-            raise InferenceServerError(f"[{sid}] {project} 컨테이너 URL 없음")
-        model_path = await self._get_model_path(dept, project)
 
-        params = {
-            "container_url": container_url,
-            "container_endpoint": "/run/v2",
-            "model_name": project,
-        }
-        if model_path:
-            params["model_path"] = model_path
+        params: dict[str, Any] = {}
+        if isinstance(input_data, str):
+            input_path = input_data
+        elif isinstance(input_data, dict) and isinstance(
+            input_data.get("image_path"), str
+        ):
+            input_path = input_data["image_path"]
+            params.update({
+                key: value
+                for key, value in input_data.items()
+                if key != "image_path"
+            })
+        else:
+            raise InferenceServerError(
+                f"[{sid}] v2 입력 경로 형식이 올바르지 않습니다."
+            )
 
-        infer_result = await self.inference_client.infer(
+        step_output_dir = save_output_dir / sid
+        step_output_dir.mkdir(parents=True, exist_ok=True)
+        infer_result = await self.inference_client.infer_v2(
             model_info=model_info,
-            model_id=model_info.get("model_id") or f"{dept}/{project}",
-            input_data=input_data,
+            model_name=project,
+            input_path=input_path,
+            output_dir=self._to_container_path(step_output_dir),
             params=params,
         )
         result = self._to_container_result(infer_result)

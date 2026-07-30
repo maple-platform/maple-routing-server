@@ -253,6 +253,28 @@ class ProjectsRepository:
         await self._save_doc(doc)
         return {"message": f"Model '{old_model_name}' renamed to '{new_model_name}'."}
 
+    async def set_risk_policy(
+        self,
+        department_name: str,
+        project_name: str,
+        policy: dict,
+    ):
+        doc = await self._get_doc()
+        dept = self._find_dept(doc, department_name) if doc else None
+        if not dept:
+            return {"error": f"Department '{department_name}' not found."}
+        _, project = self._find_project(dept, project_name)
+        if not project or "model_name" not in project:
+            return {"error": f"Model project '{project_name}' not found."}
+        project["risk_policy"] = policy
+        await self._save_doc(doc)
+        return {
+            "department": department_name,
+            "project": project["project_name"],
+            "model_name": project["model_name"],
+            "risk_policy": policy,
+        }
+
     async def delete_model(self, department_name: str, project_name: str, model_name: str):
         doc = await self._get_doc()
         dept = self._find_dept(doc, department_name)
@@ -265,7 +287,7 @@ class ProjectsRepository:
         for key in ["model_id", "model_name", "model_description", "model_path", "required_data",
                     "task_type", "result_type", "output_image_role",
                     "inference_script", "requirements_path", "docker",
-                    "inference_server", "endpoint", "parallel_safe"]:
+                    "inference_server", "endpoint", "parallel_safe", "risk_policy"]:
             pv.pop(key, None)
         await self._save_doc(doc)
         return {"message": f"Model '{model_name}' deleted from project '{project_name}'."}
