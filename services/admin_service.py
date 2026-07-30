@@ -212,6 +212,18 @@ class AdminService:
     async def update_model(self, department_name: str, project_name: str, old_model_name: str, new_model_name: str):
         return await self.projects_repo.update_model(department_name, project_name, old_model_name, new_model_name)
 
+    async def set_risk_policy(
+        self,
+        department_name: str,
+        project_name: str,
+        policy: dict,
+    ):
+        return await self.projects_repo.set_risk_policy(
+            department_name,
+            project_name,
+            policy,
+        )
+
     async def delete_model(self, department_name: str, project_name: str, model_name: str):
         if not department_name.strip():
             return {"error": "Department name cannot be empty."}

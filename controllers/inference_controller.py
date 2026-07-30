@@ -1,5 +1,6 @@
 # inference_controller.py
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,13 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from services.inference_service import InferenceService
 from services.pipeline_service import PipelineService
 from services.agent_service import AgentService
-from dependencies import get_inference_service, get_pipeline_service, get_agent_service
+from dependencies import (
+    get_agent_service,
+    get_inference_service,
+    get_pipeline_service,
+    require_doctor,
+)
+from config.database import get_database
 
 logger = logging.getLogger("maple.inference.controller")
 
@@ -77,6 +84,54 @@ def _summarize_agent_plan_body(body: dict) -> dict:
     }
 
 
+def _normalize_fixture_question(content: str) -> str:
+    return " ".join(content.split()).rstrip(" .?!。？！")
+
+
+async def _legacy_clinical_fixture(query: str, doctor: dict) -> dict | None:
+    db = get_database()
+    fixtures = await db["chat_response_fixtures"].find({
+        "hospital_id": doctor["hospital_id"],
+        "doctor_employee_id": doctor["employee_id"],
+        "normalized_questions": _normalize_fixture_question(query),
+        "legacy_inference_enabled": True,
+        "active": True,
+    }).sort("step", 1).to_list(None)
+    for fixture in fixtures:
+        step = int(fixture.get("step", 1))
+        state_id = (
+            f"{doctor['_id']}:{fixture['fixture_key']}:"
+            f"{fixture.get('patient_id', '')}"
+        )
+        if step == 1:
+            await db["chat_response_fixture_states"].update_one(
+                {"_id": state_id},
+                {"$set": {
+                    "fixture_key": fixture["fixture_key"],
+                    "patient_id": fixture.get("patient_id"),
+                    "doctor_id": doctor["_id"],
+                    "last_step": 1,
+                    "updated_at": datetime.now().astimezone(),
+                }},
+                upsert=True,
+            )
+            return fixture
+        state = await db["chat_response_fixture_states"].find_one({
+            "_id": state_id,
+            "last_step": step - 1,
+        })
+        if state:
+            await db["chat_response_fixture_states"].update_one(
+                {"_id": state_id, "last_step": step - 1},
+                {"$set": {
+                    "last_step": step,
+                    "updated_at": datetime.now().astimezone(),
+                }},
+            )
+            return fixture
+    return None
+
+
 @router.post("/agent/plan")
 async def proxy_agent_plan(
     request: Request,
@@ -119,6 +174,7 @@ async def inference_endpoint(
     inference_service: InferenceService = Depends(get_inference_service),
     pipeline_service:  PipelineService  = Depends(get_pipeline_service),
     agent_service:     AgentService     = Depends(get_agent_service),
+    doctor:             dict            = Depends(require_doctor),
 ):
     """
     모드별 추론 실행 엔드포인트.
@@ -148,6 +204,26 @@ async def inference_endpoint(
 
     # ── clinical 모드: 파일 없이 Agent RAG + LLM 즉시 답변 ──────────────────
     if mode == "clinical":
+        fixture = await _legacy_clinical_fixture(query, doctor)
+        if fixture:
+            delay_seconds = max(
+                0.0,
+                min(float(fixture.get("response_delay_seconds", 0)), 10.0),
+            )
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            logger.info(
+                "[Client] 임상 테스트 응답 사용: fixture=%s step=%s doctor=%s",
+                fixture["fixture_key"],
+                fixture["step"],
+                doctor["employee_id"],
+            )
+            return JSONResponse({
+                "status": "success",
+                "mode": "clinical",
+                "message": fixture["response"],
+                "sources": [],
+            })
         agent_resp = await agent_service.plan(mode="clinical", query=query)
         return JSONResponse({
             "status":  agent_resp.get("status", "success"),

@@ -4,7 +4,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from services.admin_service import AdminService
 from services.projects_service import ProjectsService
 from dependencies import get_projects_service, get_admin_service
-from models.schemas import DepartmentCreate, DepartmentUpdate, ProjectCreate, ProjectUpdate, ModelCreate, ModelUpdate, ModelDelete
+from models.schemas import DepartmentCreate, DepartmentUpdate, ProjectCreate, ProjectUpdate, ModelCreate, ModelUpdate, ModelDelete, RiskPolicy
 
 import logging
 from typing import List
@@ -174,3 +174,20 @@ async def delete_model(model_name: str, model: ModelDelete, service: AdminServic
     except Exception as e:
         logger.error(f"모델 삭제 중 예외 발생: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.put("/models/{department_name}/{project_name}/risk-policy")
+async def set_model_risk_policy(
+    department_name: str,
+    project_name: str,
+    policy: RiskPolicy,
+    service: AdminService = Depends(get_admin_service),
+):
+    result = await service.set_risk_policy(
+        department_name,
+        project_name,
+        policy.model_dump(),
+    )
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
