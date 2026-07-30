@@ -16,7 +16,7 @@ GridFS로 관리하며, AI Agent와 모델 실행 서버로 추론 요청을 라
 - 분석 결과·파생 이미지 조회와 만료되는 서명 URL
 - 환자의 전체 방문 이력을 활용하는 임상 채팅
 - 기존 `/inference/` 호환 및 Agent/DAG 기반 범용 추론
-- 모델 레지스트리·위험도 정책 관리자 API
+- 8개 진료과 72종 모델 레지스트리·위험도 정책 관리자 API
 - 재실행 가능한 개발·시연용 시드
 
 상세 API 계약은 [클라이언트 API 인계 문서](docs/client-api-handoff.md), 전체
@@ -32,7 +32,7 @@ maple-client (React/Electron, 사용자 PC)
 maple-routing-server (이 저장소, A100 호스트)
         ├── MongoDB replica set :27017
         ├── maple-inference :8110
-        │     └── runtime-* 모델 컨테이너 :8000
+        │     └── runtime-* 모델 컨테이너 :8000 (72종 모델)
         └── maple-agent-server :8101 (H100 사설망)
               ├── vLLM
               └── ChromaDB / Wiki
@@ -146,10 +146,29 @@ docker exec maple-mongo mongosh --quiet --eval \
 
 ### 4. 모델 레지스트리
 
+현재 모델 실행 서버의 `AI_Models/{department}/{model}/meta.json`과
+`models/{model}/config.yaml`을 기준으로 **8개 진료과 72종**이 등록 대상입니다.
+
+| 진료과 | 모델 수 |
+|---|---:|
+| Cardiology | 7 |
+| Dermatology | 7 |
+| Gastroenterology | 4 |
+| Neurology | 9 |
+| Obstetrics | 5 |
+| Ophthalmology | 4 |
+| Orthopedics | 19 |
+| Pulmonology | 17 |
+| **합계** | **72** |
+
 ```bash
 python scan_and_register.py --dry-run
 python scan_and_register.py
 ```
+
+`--dry-run`의 `발견된 모델` 수는 위 경로에서 정확히 3단계 깊이에 있는
+`meta.json`의 개수입니다. 모델 실행 서버의 자산이 변경되면 실제 스캔 결과를
+기준으로 이 표도 함께 갱신해야 합니다.
 
 ### 5. 초기 의사 계정
 

@@ -47,6 +47,7 @@
 │  maple-inference :8110                                      │
 │  - 모델 런타임 게이트웨이                                   │
 │  - runtime-basic / medical / yolo / nnunet                  │
+│  - 8개 진료과 72종 모델                                     │
 └──────────────────────────┬──────────────────────────────────┘
                            │ 사설망
                            ▼
@@ -157,6 +158,38 @@ flowchart LR
 별도 저장소는 H100 Agent가 RAG와 모델 검색에 사용하는 ChromaDB입니다.
 ChromaDB에는 Agent 지식과 모델 검색 정보가 들어가며, 환자 차트의 원본 저장소로
 사용하지 않습니다.
+
+### 모델 자산과 레지스트리
+
+2026-07-30 기준 모델 실행 서버에는 8개 진료과, 72종 모델이 있습니다.
+
+| 진료과 | 모델 수 |
+|---|---:|
+| Cardiology | 7 |
+| Dermatology | 7 |
+| Gastroenterology | 4 |
+| Neurology | 9 |
+| Obstetrics | 5 |
+| Ophthalmology | 4 |
+| Orthopedics | 19 |
+| Pulmonology | 17 |
+| **합계** | **72** |
+
+모델 수는 라우팅 서버가 임의로 정한 상수가 아닙니다. 모델 실행 서버의
+`AI_Models/{department}/{model}/meta.json`을 스캔한 결과이며, 동일한 72개
+모델에 대응하는 `models/{model}/config.yaml`이 실행 runtime을 선언합니다.
+`scan_and_register.py`는 이 메타데이터를 읽어 `maple_db.departments`에
+레지스트리를 만들고 Agent의 모델 검색 정보와 동기화합니다.
+
+```text
+AI_Models/*/*/meta.json (72)
+        │ scan_and_register.py
+        ├──▶ maple_db.departments
+        └──▶ Agent 모델 검색 / Wiki
+
+models/*/config.yaml (72)
+        └──▶ maple-inference ──▶ runtime-* ──▶ 실제 모델 실행
+```
 
 ### 컬렉션별 데이터 소유권
 
